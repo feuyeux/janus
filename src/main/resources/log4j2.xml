@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Configuration status="WARN">
+    <Appenders>
+        <Console name="Console" target="SYSTEM_OUT">
+            <PatternLayout
+                pattern="{&quot;timestamp&quot;:&quot;%d{ISO8601}&quot;,&quot;level&quot;:&quot;%p&quot;,&quot;logger&quot;:&quot;%c&quot;,&quot;traceId&quot;:&quot;%X{traceId}&quot;,&quot;spanId&quot;:&quot;%X{spanId}&quot;,&quot;message&quot;:&quot;%m&quot;}%n"/>
+        </Console>
+    </Appenders>
+    <Loggers>
+        <Logger name="org.janus" level="DEBUG"/>
+        <Logger name="io.grpc" level="INFO"/>
+        <Logger name="io.opentelemetry" level="INFO"/>
+        <Logger name="com.alibaba.nacos" level="WARN"/>
+        <Logger name="io.etcd" level="WARN"/>
+        <Logger name="org.java_websocket" level="INFO"/>
+        <Root level="INFO">
+            <AppenderRef ref="Console"/>
+        </Root>
+    </Loggers>
+</Configuration>

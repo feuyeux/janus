@@ -1,0 +1,40 @@
+apiVersion: 1
+
+datasources:
+  # ─── Loki: Distributed Log Storage & Query ──────────────────────────────
+  - name: Loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    isDefault: true
+    editable: false
+    jsonData:
+      maxLines: 1000
+      derivedFields:
+        # When a traceId appears in logs, link directly to Jaeger
+        - name: TraceID
+          matcherRegex: '"traceId":"(\w+)"'
+          url: 'http://localhost:16686/trace/$${__value.raw}'
+          datasourceUid: jaeger
+
+  # ─── Prometheus: Metrics ─────────────────────────────────────────────────
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: false
+    editable: false
+
+  # ─── Jaeger: Distributed Tracing ─────────────────────────────────────────
+  - name: Jaeger
+    type: jaeger
+    access: proxy
+    url: http://jaeger:16686
+    isDefault: false
+    editable: false
+    jsonData:
+      tracesToLogs:
+        datasourceUid: loki
+        tags:
+          - key: traceId
+            value: traceId

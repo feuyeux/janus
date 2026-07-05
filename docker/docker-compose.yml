@@ -1,0 +1,254 @@
+services:
+
+  # ════════════════════════════════════════════════════════════════════════
+  # Infrastructure Services
+  # ════════════════════════════════════════════════════════════════════════
+
+  nacos:
+    image: nacos/nacos-server:v3.2.2
+    container_name: nacos
+    environment:
+      - MODE=standalone
+      - NACOS_AUTH_ENABLE=false
+      - NACOS_AUTH_TOKEN=SmFudXNTZXJ2ZXJBdXRoVG9rZW4yMDI2U2VjcmV0S2V5
+      - NACOS_AUTH_IDENTITY_KEY=janus
+      - NACOS_AUTH_IDENTITY_VALUE=janus
+    ports:
+      - "8848:8848"
+      - "9848:9848"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8848/nacos/v1/ns/operator/metrics"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    networks:
+      - janus-net
+
+  etcd:
+    image: quay.io/coreos/etcd:v3.6.13
+    container_name: etcd
+    environment:
+      - ETCD_LISTEN_CLIENT_URLS=http://0.0.0.0:2379
+      - ETCD_NAME=etcd
+      - ETCD_ADVERTISE_CLIENT_URLS=http://etcd:2379
+      - ETCD_LISTEN_PEER_URLS=http://0.0.0.0:2380
+      - ETCD_INITIAL_ADVERTISE_PEER_URLS=http://etcd:2380
+      - ETCD_INITIAL_CLUSTER=etcd=http://etcd:2380
+      - ETCD_INITIAL_CLUSTER_STATE=new
+      - ETCD_INITIAL_CLUSTER_TOKEN=etcd-cluster
+      - ALLOW_NONE_AUTHENTICATION=yes
+    ports:
+      - "2379:2379"
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - janus-net
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.76.0
+    container_name: jaeger
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+      - COLLECTOR_OTLP_GRPC_HOST_PORT=:4317
+      - COLLECTOR_OTLP_HTTP_HOST_PORT=:4318
+    ports:
+      - "16686:16686"  # Jaeger UI
+      - "4317:4317"    # OTLP gRPC
+      - "4318:4318"    # OTLP HTTP
+    networks:
+      - janus-net
+
+  # ── Metrics: Prometheus ───────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v3.13.0
+    container_name: prometheus
+    volumes:
+      - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - janus-server-I
+      - janus-server-II
+      - janus-server-III
+    networks:
+      - janus-net
+
+  # ── Logs: Loki (distributed log storage) ───────────────────────────────
+  loki:
+    image: grafana/loki:3.6.11
+    container_name: loki
+    command: -config.file=/etc/loki/loki-config.yml
+    volumes:
+      - ./docker/loki-config.yml:/etc/loki/loki-config.yml:ro
+    ports:
+      - "3100:3100"  # Loki API
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:3100/ready || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 120s
+    networks:
+      - janus-net
+
+  # ── Logs: Promtail (collects Docker container logs → Loki) ─────────────
+  promtail:
+    image: grafana/promtail:3.6.11
+    container_name: promtail
+    command: -config.file=/etc/promtail/promtail-config.yml
+    volumes:
+      - ./docker/promtail-config.yml:/etc/promtail/promtail-config.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    depends_on:
+      loki:
+        condition: service_started
+    networks:
+      - janus-net
+
+  # ── Unified UI: Grafana (logs + metrics + traces) ──────────────────────
+  grafana:
+    image: grafana/grafana:12.2.10
+    container_name: grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"  # Grafana UI
+    depends_on:
+      loki:
+        condition: service_started
+    networks:
+      - janus-net
+
+  # ════════════════════════════════════════════════════════════════════════
+  # Janus Servers
+  # Chain: Postman → S1 (WS) → [Nacos] → S2 (WS) → [etcd] → S3 (gRPC)
+  # ════════════════════════════════════════════════════════════════════════
+
+  janus-server-I:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: janus-server-I
+    environment:
+      - JANUS_SERVER_ID=server-I
+      - JANUS_WS_PORT=8080
+      - JANUS_GRPC_PORT=9090
+      - JANUS_METRICS_PORT=9100
+      - JANUS_ADVERTISED_HOST=janus-server-I
+      # Entry node: receives from Postman, forwards via WS to S2
+      - JANUS_DOWNSTREAM_PROTOCOL=ws
+      - JANUS_DOWNSTREAM_DISCOVERY=nacos
+      - JANUS_DOWNSTREAM_SERVICE=janus-server
+      - JANUS_REGISTER=none
+      # Discovery endpoints
+      - JANUS_NACOS_ENDPOINT=nacos:8848
+      - JANUS_ETCD_ENDPOINT=http://etcd:2379
+      # Observability
+      - JANUS_OTEL_ENABLED=Y
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
+      - OTEL_SERVICE_NAME=janus
+    ports:
+      - "8080:8080"   # WebSocket (for Postman)
+      - "9091:9090"   # gRPC
+      - "9101:9100"   # Metrics
+    depends_on:
+      nacos:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - janus-net
+
+  janus-server-II:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: janus-server-II
+    environment:
+      - JANUS_SERVER_ID=server-II
+      - JANUS_WS_PORT=8080
+      - JANUS_GRPC_PORT=9090
+      - JANUS_METRICS_PORT=9100
+      - JANUS_ADVERTISED_HOST=janus-server-II
+      # Middle node: receives via WS from S1, forwards via gRPC to S3
+      - JANUS_DOWNSTREAM_PROTOCOL=grpc
+      - JANUS_DOWNSTREAM_DISCOVERY=etcd
+      - JANUS_DOWNSTREAM_SERVICE=janus-server
+      # Register in Nacos so S1 can discover this server
+      - JANUS_REGISTER=nacos
+      # Discovery endpoints
+      - JANUS_NACOS_ENDPOINT=nacos:8848
+      - JANUS_ETCD_ENDPOINT=http://etcd:2379
+      # Observability
+      - JANUS_OTEL_ENABLED=Y
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
+      - OTEL_SERVICE_NAME=janus
+    ports:
+      - "8081:8080"   # WebSocket
+      - "9092:9090"   # gRPC
+      - "9102:9100"   # Metrics
+    depends_on:
+      nacos:
+        condition: service_healthy
+      etcd:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - janus-net
+
+  janus-server-III:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: janus-server-III
+    environment:
+      - JANUS_SERVER_ID=server-III
+      - JANUS_WS_PORT=8080
+      - JANUS_GRPC_PORT=9090
+      - JANUS_METRICS_PORT=9100
+      - JANUS_ADVERTISED_HOST=janus-server-III
+      # Terminal node: receives via gRPC from S2, processes locally
+      - JANUS_DOWNSTREAM_PROTOCOL=none
+      - JANUS_DOWNSTREAM_DISCOVERY=none
+      # Register in etcd so S2 can discover this server
+      - JANUS_REGISTER=etcd
+      # Discovery endpoints
+      - JANUS_NACOS_ENDPOINT=nacos:8848
+      - JANUS_ETCD_ENDPOINT=http://etcd:2379
+      # Observability
+      - JANUS_OTEL_ENABLED=Y
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
+      - OTEL_SERVICE_NAME=janus
+    ports:
+      - "8082:8080"   # WebSocket
+      - "9093:9090"   # gRPC
+      - "9103:9100"   # Metrics
+    depends_on:
+      etcd:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - janus-net
+
+volumes:
+  grafana-data:
+
+networks:
+  janus-net:
+    driver: bridge
