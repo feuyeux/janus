@@ -22,55 +22,116 @@ Postman ──[WS JSON]──▶ janus-server-i ──[Nacos 发现]──▶ ja
 ## 2. 系统架构图
 
 ```mermaid
-graph TB
-    subgraph 客户端
-        PM[Postman]
+flowchart TB
+    %% =======================
+    %% Top: Client + Janus Service Chain
+    %% =======================
+    subgraph APP["客户端与 Janus 服务链"]
+        direction LR
+
+        POSTMAN["Postman<br/>WS Client"]
+
+        S1["janus-server-i<br/>WS(JSON) Server<br/>gRPC Client"]
+
+        S2["janus-server-ii<br/>gRPC Server<br/>WS(Binary) Client"]
+
+        S3["janus-server-iii<br/>WS(Binary) Server<br/>Business Handler"]
+
+        POSTMAN -->|"① WS 请求<br/>JSON / Binary"| S1
+        S1 -->|"④ gRPC 请求转发"| S2
+        S2 -->|"⑦ WS Binary 请求转发"| S3
+
+        S3 -->|"⑧ 本地业务处理"| S3
+
+        S3 -->|"⑨ WS Binary 响应"| S2
+        S2 -->|"⑩ gRPC 响应"| S1
+        S1 -->|"⑪ WS 响应<br/>JSON / Binary"| POSTMAN
     end
 
-    subgraph Janus 服务链
-        S1[janus-server-i<br/>WS(JSON) Server + gRPC Client]
-        S2[janus-server-ii<br/>gRPC Server + WS(Binary) Client]
-        S3[janus-server-iii<br/>WS(Binary) Server]
+    %% =======================
+    %% Middle: Service Discovery
+    %% =======================
+    subgraph DISCOVERY["服务发现"]
+        direction LR
+
+        NACOS["Nacos<br/>S1 发现 S2"]
+        ETCD["etcd<br/>S2 发现 S3"]
     end
 
-    subgraph 服务发现
-        NC[Nacos<br/>S1 → S2 发现]
-        ET[etcd<br/>S2 → S3 发现]
+    %% =======================
+    %% Bottom: Observability
+    %% =======================
+    subgraph OBS["可观测性"]
+        direction TB
+
+        subgraph COLLECT["采集与存储"]
+            direction LR
+
+            JAEGER["Jaeger<br/>Trace Storage"]
+            PROM["Prometheus<br/>Metrics Storage"]
+            PROMTAIL["Promtail<br/>Log Collector"]
+            LOKI["Loki<br/>Log Storage"]
+        end
+
+        GRAFANA["Grafana<br/>Unified Query / Dashboard"]
+
+        PROMTAIL -->|"Push Logs"| LOKI
+
+        JAEGER -->|"Trace Datasource"| GRAFANA
+        PROM -->|"Metrics Datasource"| GRAFANA
+        LOKI -->|"Log Datasource"| GRAFANA
     end
 
-    subgraph 可观测性
-        JG[Jaeger<br/>分布式追踪]
-        PM2[Prometheus<br/>指标存储]
-        LK[Loki<br/>日志存储]
-        GF[Grafana<br/>统一查询]
-        PT[Promtail<br/>日志采集]
-    end
+    %% =======================
+    %% Service Discovery Flow
+    %% =======================
+    S1 -.->|"② Discover S2"| NACOS
+    NACOS -.->|"③ Return S2 Address"| S1
 
-    PM -->|WS JSON/Binary| S1
-    S1 -->|Nacos 发现 S2| NC
-    NC -->|返回 S2 地址| S1
-    S1 -->|gRPC 转发| S2
-    S2 -->|etcd 发现 S3| ET
-    ET -->|返回 S3 地址| S2
-    S2 -->|WS Binary 转发| S3
-    S3 -->|本地处理| S3
+    S2 -.->|"⑤ Discover S3"| ETCD
+    ETCD -.->|"⑥ Return S3 Address"| S2
 
-    S1 -->|OTLP Traces| JG
-    S2 -->|OTLP Traces| JG
-    S3 -->|OTLP Traces| JG
+    %% =======================
+    %% Observability Flow
+    %% =======================
+    S1 -->|"OTLP Traces"| JAEGER
+    S2 -->|"OTLP Traces"| JAEGER
+    S3 -->|"OTLP Traces"| JAEGER
 
-    S1 -->|Prometheus Scrape| PM2
-    S2 -->|Prometheus Scrape| PM2
-    S3 -->|Prometheus Scrape| PM2
+    PROM -.->|"Scrape /metrics"| S1
+    PROM -.->|"Scrape /metrics"| S2
+    PROM -.->|"Scrape /metrics"| S3
 
-    S1 -->|stdout JSON 日志| PT
-    S2 -->|stdout JSON 日志| PT
-    S3 -->|stdout JSON 日志| PT
-    PT -->|推送日志| LK
+    S1 -->|"stdout JSON Logs"| PROMTAIL
+    S2 -->|"stdout JSON Logs"| PROMTAIL
+    S3 -->|"stdout JSON Logs"| PROMTAIL
 
-    GF -->|查询| LK
-    GF -->|查询| PM2
-    GF -->|查询| JG
+    %% =======================
+    %% Node Styles
+    %% =======================
+    classDef client fill:#F3F4F6,stroke:#6B7280,color:#111827,stroke-width:1.5px;
+    classDef service fill:#E0F2FE,stroke:#0284C7,color:#0C4A6E,stroke-width:1.8px;
+    classDef discovery fill:#DCFCE7,stroke:#16A34A,color:#14532D,stroke-width:1.5px;
+    classDef trace fill:#F3E8FF,stroke:#9333EA,color:#581C87,stroke-width:1.5px;
+    classDef metrics fill:#FEF3C7,stroke:#D97706,color:#78350F,stroke-width:1.5px;
+    classDef logs fill:#FFE4E6,stroke:#E11D48,color:#881337,stroke-width:1.5px;
+    classDef dashboard fill:#DBEAFE,stroke:#2563EB,color:#1E3A8A,stroke-width:1.8px;
+
+    class POSTMAN client;
+    class S1,S2,S3 service;
+    class NACOS,ETCD discovery;
+    class JAEGER trace;
+    class PROM metrics;
+    class PROMTAIL,LOKI logs;
+    class GRAFANA dashboard;
+
+    %% =======================
+    %% Subgraph Styles
+    %% =======================
+    style APP fill:#F8FAFC,stroke:#38BDF8,stroke-width:1px
+    style DISCOVERY fill:#F0FDF4,stroke:#22C55E,stroke-width:1px
+    style OBS fill:#F8FAFC,stroke:#64748B,stroke-width:1px
+    style COLLECT fill:#FFFFFF,stroke:#CBD5E1,stroke-width:1px
 ```
 
 ---

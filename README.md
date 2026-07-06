@@ -15,6 +15,7 @@
 - **单代码多角色**：所有节点运行同一份代码，通过环境变量配置不同角色（入口 / 中间 / 终端节点）
 - **Docker Compose 一键启动**：包含 3 个 Janus 实例 + Nacos + etcd + Jaeger + Prometheus + Loki + Promtail + Grafana 的完整本地环境
 
+![](janus-topology.png)
 ## 技术栈
 
 | 类别 | 技术 | 版本 |
