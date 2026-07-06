@@ -74,6 +74,12 @@ public record JanusMessage(
                 null, null, errorMsg, null, null, 0, true, null);
     }
 
+    /** Error envelope carrying an explicit status (e.g. 503 for downstream unavailable). */
+    public static JanusMessage error(String method, int status, String errorMsg) {
+        return new JanusMessage(method, MODE_ERROR, null, null,
+                status, null, errorMsg, null, null, 0, true, null);
+    }
+
     // ── Withers (records are immutable; rebuild with one field changed) ───────
     /** Return a copy carrying the given correlation id. */
     public JanusMessage withRequestId(String newRequestId) {

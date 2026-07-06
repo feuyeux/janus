@@ -141,7 +141,7 @@ public class JanusWsClient {
             }
         }
         started = !pool.isEmpty();
-        log.info("WS forwarding pool size: {} (target {})", pool.size(), poolSize);
+        log.debug("WS forwarding pool size: {} (target {})", pool.size(), poolSize);
     }
 
     public boolean isConnected() {
@@ -239,6 +239,12 @@ public class JanusWsClient {
         MultiplexClient(URI serverUri) {
             super(serverUri);
             addHeader("userId", "janus-ws-client-" + UUID.randomUUID().toString().substring(0, 8));
+            // Fast liveness detection so a dead/half-open downstream link is closed
+            // (triggering onClose → failAllPending + pool eviction) well before the
+            // 60s library default, letting the maintainer reconnect promptly.
+            if (ServerConfig.WS_CONN_LOST_TIMEOUT_SEC > 0) {
+                setConnectionLostTimeout(ServerConfig.WS_CONN_LOST_TIMEOUT_SEC);
+            }
             // Propagate the shared secret so the downstream node accepts us when
             // auth is enabled. No-op when auth is disabled (empty token).
             if (ServerConfig.authEnabled()) {

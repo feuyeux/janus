@@ -72,9 +72,9 @@ services:
     ports:
       - "9090:9090"
     depends_on:
-      - janus-server-I
-      - janus-server-II
-      - janus-server-III
+      - janus-server-i
+      - janus-server-ii
+      - janus-server-iii
     networks:
       - janus-net
 
@@ -135,17 +135,17 @@ services:
   # Chain: Postman → S1 (WS) → [Nacos] → S2 (WS) → [etcd] → S3 (gRPC)
   # ════════════════════════════════════════════════════════════════════════
 
-  janus-server-I:
+  janus-server-i:
     build:
       context: .
       dockerfile: docker/Dockerfile
-    container_name: janus-server-I
+    container_name: janus-server-i
     environment:
-      - JANUS_SERVER_ID=server-I
+      - JANUS_SERVER_ID=server-i
       - JANUS_WS_PORT=8080
       - JANUS_GRPC_PORT=9090
       - JANUS_METRICS_PORT=9100
-      - JANUS_ADVERTISED_HOST=janus-server-I
+      - JANUS_ADVERTISED_HOST=janus-server-i
       # Entry node: receives from Postman, forwards via WS to S2
       - JANUS_DOWNSTREAM_PROTOCOL=ws
       - JANUS_DOWNSTREAM_DISCOVERY=nacos
@@ -171,17 +171,17 @@ services:
     networks:
       - janus-net
 
-  janus-server-II:
+  janus-server-ii:
     build:
       context: .
       dockerfile: docker/Dockerfile
-    container_name: janus-server-II
+    container_name: janus-server-ii
     environment:
-      - JANUS_SERVER_ID=server-II
+      - JANUS_SERVER_ID=server-ii
       - JANUS_WS_PORT=8080
       - JANUS_GRPC_PORT=9090
       - JANUS_METRICS_PORT=9100
-      - JANUS_ADVERTISED_HOST=janus-server-II
+      - JANUS_ADVERTISED_HOST=janus-server-ii
       # Middle node: receives via WS from S1, forwards via gRPC to S3
       - JANUS_DOWNSTREAM_PROTOCOL=grpc
       - JANUS_DOWNSTREAM_DISCOVERY=etcd
@@ -210,17 +210,17 @@ services:
     networks:
       - janus-net
 
-  janus-server-III:
+  janus-server-iii:
     build:
       context: .
       dockerfile: docker/Dockerfile
-    container_name: janus-server-III
+    container_name: janus-server-iii
     environment:
-      - JANUS_SERVER_ID=server-III
+      - JANUS_SERVER_ID=server-iii
       - JANUS_WS_PORT=8080
       - JANUS_GRPC_PORT=9090
       - JANUS_METRICS_PORT=9100
-      - JANUS_ADVERTISED_HOST=janus-server-III
+      - JANUS_ADVERTISED_HOST=janus-server-iii
       # Terminal node: receives via gRPC from S2, processes locally
       - JANUS_DOWNSTREAM_PROTOCOL=none
       - JANUS_DOWNSTREAM_DISCOVERY=none

@@ -27,17 +27,17 @@ docker compose -f docker/docker-compose.yml --project-directory . up --build
 # 查看所有服务状态
 docker compose -f docker/docker-compose.yml --project-directory . ps
 
-# 查看 janus-server-I 启动日志
-docker compose -f docker/docker-compose.yml --project-directory . logs janus-server-I
+# 查看 janus-server-i 启动日志
+docker compose -f docker/docker-compose.yml --project-directory . logs janus-server-i
 ```
 
-启动成功后，janus-server-I 会输出：
+启动成功后，janus-server-i 会输出：
 ```
 ║ Janus Server started successfully
-║   WebSocket:  ws://janus-server-I:8080/json  (JSON mode)
-║   WebSocket:  ws://janus-server-I:8080/binary (Binary mode)
-║   gRPC:       janus-server-I:9090
-║   Metrics:    http://janus-server-I:9100/metrics
+║   WebSocket:  ws://janus-server-i:8080/json  (JSON mode)
+║   WebSocket:  ws://janus-server-i:8080/binary (Binary mode)
+║   gRPC:       janus-server-i:9090
+║   Metrics:    http://janus-server-i:9100/metrics
 ```
 
 ---
@@ -46,15 +46,15 @@ docker compose -f docker/docker-compose.yml --project-directory . logs janus-ser
 
 | 服务 | 容器端口 | 宿主机端口 | 用途 |
 |------|---------|-----------|------|
-| janus-server-I | 8080 | **8080** | WebSocket 入口（Postman 连接） |
-| janus-server-I | 9090 | 9091 | gRPC |
-| janus-server-I | 9100 | 9101 | Prometheus 指标 |
-| janus-server-II | 8080 | 8081 | WebSocket |
-| janus-server-II | 9090 | 9092 | gRPC |
-| janus-server-II | 9100 | 9102 | Prometheus 指标 |
-| janus-server-III | 8080 | 8082 | WebSocket |
-| janus-server-III | 9090 | 9093 | gRPC |
-| janus-server-III | 9100 | 9103 | Prometheus 指标 |
+| janus-server-i | 8080 | **8080** | WebSocket 入口（Postman 连接） |
+| janus-server-i | 9090 | 9091 | gRPC |
+| janus-server-i | 9100 | 9101 | Prometheus 指标 |
+| janus-server-ii | 8080 | 8081 | WebSocket |
+| janus-server-ii | 9090 | 9092 | gRPC |
+| janus-server-ii | 9100 | 9102 | Prometheus 指标 |
+| janus-server-iii | 8080 | 8082 | WebSocket |
+| janus-server-iii | 9090 | 9093 | gRPC |
+| janus-server-iii | 9100 | 9103 | Prometheus 指标 |
 | Nacos | 8848 | **8848** | Nacos 控制台 |
 | etcd | 2379 | **2379** | etcd API |
 | Jaeger | 16686 | **16686** | Jaeger UI |
@@ -137,6 +137,8 @@ wscat -c ws://localhost:8080/json
 {"method":"TALK_BIDIRECTIONAL","mode":"REQUEST","data":"0","meta":"postman","seq":0,"stream_end":false}
 {"method":"TALK_BIDIRECTIONAL","mode":"REQUEST","data":"1","meta":"postman","seq":1,"stream_end":true}
 ```
+
+> **⚠️ WS 入口的流式限制**：经 WebSocket 入口发送时，客户端流（`TALK_MORE_ANSWER_ONE`）与双向流（`TALK_BIDIRECTIONAL`）会被桥接层**收敛为一元调用**（每条 WS 消息各自触发一次独立的一元请求-响应）；服务端流（`TALK_ONE_ANSWER_MORE`）会聚合为单个响应帧返回。要体验**真正的**四种流式语义，请用 `grpcurl` 直连原生 gRPC 入口（见 [§3.4](#34-grpc-测试grpcurl)），机制详见 [协议规范 §6.3](protocol.md#63-转换规则)。
 
 **响应消息（Unary 示例）：**
 ```json
@@ -223,15 +225,15 @@ curl http://localhost:9090/api/v1/targets | python3 -m json.tool
 # Jaeger 查看所有服务
 curl http://localhost:16686/api/services
 
-# Jaeger 查看 janus-server-I 的最近 10 条 Trace
-curl 'http://localhost:16686/api/traces?service=janus-server-I&limit=10'
+# Jaeger 查看 janus-server-i 的最近 10 条 Trace
+curl 'http://localhost:16686/api/traces?service=janus-server-i&limit=10'
 
 # Loki 查看所有标签
 curl http://localhost:3100/loki/api/v1/labels
 
-# Loki 查询 janus-server-I 的日志
+# Loki 查询 janus-server-i 的日志
 curl -G 'http://localhost:3100/loki/api/v1/query_range' \
-  --data-urlencode 'query={container_name="janus-server-I"}' \
+  --data-urlencode 'query={container_name="janus-server-i"}' \
   --data-urlencode 'limit=10'
 
 # Loki 按 traceId 查询跨节点日志
@@ -268,7 +270,7 @@ docker exec etcd etcdctl get --prefix janus-server
 {service=~"janus-server.*"}
 
 # 按服务名过滤
-{service="janus-server-I"}
+{service="janus-server-i"}
 
 # 按日志级别过滤
 {service=~"janus-server.*", level="ERROR"}
@@ -299,7 +301,7 @@ rate(rpc_calls_total[1m])
 #### 查看追踪（Jaeger）
 
 1. 选择数据源：**Jaeger**
-2. 选择 Service：`janus-server-I`
+2. 选择 Service：`janus-server-i`
 3. 点击 Find Traces
 4. 展开 Trace 可看到完整链路：S1 → S2 → S3
 
@@ -325,7 +327,7 @@ rate(rpc_calls_total[1m])
 
 ```
 1. 在 Grafana → Loki 中搜索日志，发现异常
-   {service="janus-server-II"} |= "ERROR"
+   {service="janus-server-ii"} |= "ERROR"
 
 2. 从日志中获取 traceId（Loki 标签或日志字段）
 
@@ -393,7 +395,7 @@ docker run -d --name jaeger -p 16686:16686 -p 4317:4317 \
 终端节点 (S3)：
 ```bash
 java -jar target/janus.jar \
-  -DJANUS_SERVER_ID=server-III \
+  -DJANUS_SERVER_ID=server-iii \
   -DJANUS_REGISTER=etcd \
   -DJANUS_ETCD_ENDPOINT=http://localhost:2379 \
   -DJANUS_ADVERTISED_HOST=localhost \
@@ -405,7 +407,7 @@ java -jar target/janus.jar \
 中间节点 (S2)：
 ```bash
 java -jar target/janus.jar \
-  -DJANUS_SERVER_ID=server-II \
+  -DJANUS_SERVER_ID=server-ii \
   -DJANUS_DOWNSTREAM_PROTOCOL=grpc \
   -DJANUS_DOWNSTREAM_DISCOVERY=etcd \
   -DJANUS_REGISTER=nacos \
@@ -420,7 +422,7 @@ java -jar target/janus.jar \
 入口节点 (S1)：
 ```bash
 java -jar target/janus.jar \
-  -DJANUS_SERVER_ID=server-I \
+  -DJANUS_SERVER_ID=server-i \
   -DJANUS_DOWNSTREAM_PROTOCOL=ws \
   -DJANUS_DOWNSTREAM_DISCOVERY=nacos \
   -DJANUS_NACOS_ENDPOINT=localhost:8848 \
@@ -430,7 +432,7 @@ java -jar target/janus.jar \
   -DOTEL_SERVICE_NAME=janus
 ```
 
-> 注意：`OTEL_SERVICE_NAME` 是基础名称，代码会自动追加 `-{SERVER_ID}` 后缀（如 `janus-server-I`）。
+> 注意：`OTEL_SERVICE_NAME` 是基础名称，代码会自动追加 `-{SERVER_ID}` 后缀（如 `janus-server-i`）。
 
 ### 5.4 可选：WebSocket 共享令牌鉴权
 
@@ -484,7 +486,7 @@ docker compose -f docker/docker-compose.yml --project-directory . build --no-cac
 
 ```bash
 # 查看具体服务日志
-docker compose -f docker/docker-compose.yml logs janus-server-I
+docker compose -f docker/docker-compose.yml logs janus-server-i
 
 # 常见问题：
 # - Nacos 未就绪 → 等待 healthcheck 通过（约 30 秒）
@@ -503,7 +505,7 @@ docker logs nacos 2>&1 | grep janus-server
 docker exec etcd etcdctl get --prefix janus-server
 
 # 检查 S1 是否能发现 S2
-docker logs janus-server-I 2>&1 | grep "Discovered"
+docker logs janus-server-i 2>&1 | grep "Discovered"
 ```
 
 ### 7.3 追踪数据缺失
@@ -513,7 +515,7 @@ docker logs janus-server-I 2>&1 | grep "Discovered"
 # 访问 http://localhost:16686 → 查看是否有 Service 列表
 
 # 检查 OTLP 连接
-docker logs janus-server-I 2>&1 | grep "OpenTelemetry"
+docker logs janus-server-i 2>&1 | grep "OpenTelemetry"
 ```
 
 ### 7.4 日志未采集

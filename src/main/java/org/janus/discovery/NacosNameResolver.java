@@ -100,7 +100,7 @@ public class NacosNameResolver extends NameResolver {
                 return;
             }
             lastGood = groups;
-            log.info("Resolved {} healthy instances for [{}] from Nacos", groups.size(), serviceName);
+            log.debug("Resolved {} healthy instances for [{}] from Nacos", groups.size(), serviceName);
             current.onAddresses(groups, Attributes.EMPTY);
         } catch (NacosException e) {
             log.error("Nacos discovery error: {}", e.getErrMsg());

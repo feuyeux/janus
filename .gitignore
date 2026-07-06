@@ -17,8 +17,9 @@ buildNumber.properties
 *.ear
 *.log
 
-# Protobuf generated
-src/main/java/org/janus/grpc/proto/
+# Protobuf generated (generated sources live under target/; this guards against
+# any accidental in-source generation of the org.janus.proto package)
+src/main/java/org/janus/proto/
 
 # IDE - IntelliJ
 .idea/

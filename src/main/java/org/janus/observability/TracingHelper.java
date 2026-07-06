@@ -51,7 +51,7 @@ public class TracingHelper {
         String spanId = span.getSpanContext().getSpanId();
         MDC.put("traceId", traceId);
         MDC.put("spanId", spanId);
-        log.info("Span started: {} traceId={} spanId={}", spanName, traceId, spanId);
+        log.debug("Span started: {} traceId={} spanId={}", spanName, traceId, spanId);
         return span;
     }
 
@@ -75,7 +75,7 @@ public class TracingHelper {
 
         String traceId = span.getSpanContext().getTraceId();
         String spanId = span.getSpanContext().getSpanId();
-        log.info("Client span started: {} traceId={} spanId={}", spanName, traceId, spanId);
+        log.debug("Client span started: {} traceId={} spanId={}", spanName, traceId, spanId);
         return span;
     }
 

@@ -135,10 +135,10 @@ public class EtcdNameResolver extends NameResolver implements Watch.Listener {
     // guarded by it.
     @GuardedBy("this")
     private void updateListener() {
-        log.info("updating server list from etcd...");
+        log.debug("updating server list from etcd...");
         List<EquivalentAddressGroup> svcAddressList = new ArrayList<>();
         for (URI uri : serviceUris) {
-            log.info("online: {}", uri);
+            log.debug("online: {}", uri);
             List<SocketAddress> socketAddresses = new ArrayList<>();
             socketAddresses.add(new InetSocketAddress(uri.getHost(), uri.getPort()));
             svcAddressList.add(new EquivalentAddressGroup(socketAddresses));

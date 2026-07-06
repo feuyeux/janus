@@ -44,6 +44,9 @@ public class JanusServer {
     private ServiceRegistry registry;
     private ServiceRegistry discoveryRegistry;
     private TracingHelper tracingHelper;
+    // Ensures stop() runs at most once (shutdown hook + explicit call).
+    private final java.util.concurrent.atomic.AtomicBoolean stopped =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
 
     public void start() throws Exception {
         log.info("╔════════════════════════════════════════════════════════════════");
@@ -147,22 +150,58 @@ public class JanusServer {
     }
 
     public void stop() {
-        log.info("Shutting down Janus Server...");
+        // Guard against double execution (e.g. the JVM shutdown hook firing while
+        // an explicit stop() is already in progress).
+        if (!stopped.compareAndSet(false, true)) {
+            return;
+        }
+        log.info("Shutting down Janus Server (graceful)...");
 
+        // 1. Deregister FIRST so discovery stops handing this node to upstreams.
+        //    etcd issues a DELETE and Nacos a deregister; peers' resolvers observe
+        //    it and steer new traffic away before we stop serving.
+        if (registry != null) {
+            try {
+                registry.deregister(ServerConfig.SVC_DISC_NAME);
+            } catch (Exception e) {
+                log.warn("Error deregistering from discovery", e);
+            }
+        }
+
+        // 2. Drain window: let upstreams notice the deregistration and let in-flight
+        //    requests complete before we close the listeners. During this window the
+        //    node still serves and can still use its downstream clients.
+        long drain = ServerConfig.SHUTDOWN_DRAIN_MS;
+        if (drain > 0) {
+            log.info("Draining for {} ms before closing listeners", drain);
+            try {
+                Thread.sleep(drain);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+
+        // 3. Stop inbound listeners: stop accepting new work and drain the handler
+        //    pool. gRPC's stop() flips health to NOT_SERVING and awaits in-flight
+        //    calls before forcing termination.
         if (wsServer != null) {
             try { wsServer.stop(1000); } catch (Exception e) { log.warn("Error stopping WS server", e); }
         }
         if (grpcServer != null) {
             grpcServer.stop();
         }
+
+        // 4. Close downstream clients only after inbound has drained, so forwards
+        //    issued during the drain window still had a working channel/pool.
         if (wsClient != null) {
             wsClient.shutdown();
         }
         if (grpcClient != null) {
             grpcClient.shutdown();
         }
+
+        // 5. Close registry connections and flush observability last.
         if (registry != null) {
-            registry.deregister(ServerConfig.SVC_DISC_NAME);
             try { registry.close(); } catch (Exception ignored) {}
         }
         if (discoveryRegistry != null && discoveryRegistry != registry) {

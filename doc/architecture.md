@@ -7,15 +7,15 @@ Janus Server 是一个统一通信服务器，同时支持 **WebSocket JSON**、
 ### 请求链路
 
 ```
-Postman ──[WS JSON/Binary]──▶ janus-server-I ──[Nacos 发现]──▶ janus-server-II ──[etcd 发现]──▶ janus-server-III
+Postman ──[WS JSON/Binary]──▶ janus-server-i ──[Nacos 发现]──▶ janus-server-ii ──[etcd 发现]──▶ janus-server-iii
       (入口)                    (WS 转发)              (中间节点)              (gRPC 转发)            (终端处理)
 ```
 
 | 节点 | 接收协议 | 转发协议 | 服务发现 | 服务注册 |
 |------|---------|---------|---------|---------|
-| janus-server-I | WebSocket (Postman 直连) | WebSocket | Nacos | 无 |
-| janus-server-II | WebSocket (S1 → S2) | gRPC | etcd | Nacos |
-| janus-server-III | gRPC (S2 → S3) | 无 (本地处理) | 无 | etcd |
+| janus-server-i | WebSocket (Postman 直连) | WebSocket | Nacos | 无 |
+| janus-server-ii | WebSocket (S1 → S2) | gRPC | etcd | Nacos |
+| janus-server-iii | gRPC (S2 → S3) | 无 (本地处理) | 无 | etcd |
 
 ---
 
@@ -28,9 +28,9 @@ graph TB
     end
 
     subgraph Janus 服务链
-        S1[janus-server-I<br/>WS Server + WS Client]
-        S2[janus-server-II<br/>WS Server + gRPC Client]
-        S3[janus-server-III<br/>gRPC Server]
+        S1[janus-server-i<br/>WS Server + WS Client]
+        S2[janus-server-ii<br/>WS Server + gRPC Client]
+        S3[janus-server-iii<br/>gRPC Server]
     end
 
     subgraph 服务发现
@@ -185,16 +185,24 @@ janus-server-java/
 | `TalkMoreAnswerOne` | Client Streaming | 客户端流式，多请求一响应 |
 | `TalkBidirectional` | Bidirectional Streaming | 双向流式 |
 
+> 上述四种模型的完整流式语义仅在**原生 gRPC 入口路径**（gRPC → gRPC）上保留。经 **WS 入口**桥接到 gRPC 时，客户端流（`TalkMoreAnswerOne`）与双向流（`TalkBidirectional`）会收敛为一元 `Talk` 调用，服务端流（`TalkOneAnswerMore`）则聚合为单个响应帧返回——详见 [协议规范 §6.3](protocol.md#63-转换规则)。
+
 ### 5.4 ChainHandler (链路编排)
 
 [ChainHandler.java](../src/main/java/org/janus/handler/ChainHandler.java) 根据配置决定请求处理方式：
 
 ```
 收到请求
-  ├── downstream = grpc → 通过 gRPC 客户端转发到下游
-  ├── downstream = ws   → 通过 WS 客户端转发到下游
+  ├── downstream = grpc → gRPC 客户端可用 → 通过 gRPC 转发到下游
+  │                     └ gRPC 客户端不可用 → 返回 503 错误信封
+  ├── downstream = ws   → WS 客户端可用   → 通过 WS 转发到下游
+  │                     └ WS 客户端不可用   → 返回 503 错误信封
   └── downstream = none → 本地处理（终端节点）
 ```
+
+> **故障语义**：被配置为转发角色（S1 / S2）的节点，若下游不可用**不会**静默回退到本地处理（那会掩盖下游故障并返回伪造结果），而是返回 `status=503` 的 `ERROR` 信封，使故障沿链路上抛。本地处理仅保留给未配置下游的终端节点（S3）。
+>
+> 经 WS 入口桥接到 gRPC 时，客户端流 / 双向流会**收敛为一元调用**，完整流式语义详见 [协议规范 §6.3](protocol.md#63-转换规则)。
 
 每次处理创建 OpenTelemetry Span，实现全链路追踪。
 
@@ -250,8 +258,10 @@ Postman → S1 (WS Server Span) → S1 (WS Client Span) → S2 (WS Server Span) 
 Log4j2 输出 JSON 格式日志，包含 MDC 中的 `traceId` 和 `spanId`：
 
 ```json
-{"timestamp":"2026-07-05T15:56:48,123","level":"INFO","logger":"org.janus.handler.ChainHandler","traceId":"abc123def456","spanId":"7890abcdef","message":"Forwarding via gRPC: data=0, meta=postman"}
+{"timestamp":"2026-07-05T15:56:48,123","level":"INFO","logger":"org.janus.handler.ChainHandler","traceId":"abc123def456","spanId":"7890abcdef","message":"Janus Server started successfully"}
 ```
+
+> **日志级别**：`org.janus` 默认为 `INFO`（见 [log4j2.xml](../src/main/resources/log4j2.xml)），保留启动 / 生命周期 / 错误日志。每请求、每跳、周期性的热点日志（如 `Forwarding via gRPC`、`Processing locally`、Span 创建、连接池刷新、发现结果）统一为 `DEBUG`，以避免高吞吐下的延迟与日志放大；本地排障时可将 `org.janus` 调为 `DEBUG` 获取逐请求明细。
 
 Promtail 解析 JSON 并将 `traceId`/`spanId` 提取为 Loki 标签，支持通过 Trace ID 关联查询跨节点日志。
 
@@ -280,15 +290,15 @@ Grafana 自动配置三个数据源：
 │  └────┬─────┘  └────┬─────┘  └────┬─────┘                       │
 │       │              │              │                             │
 │  ┌────┴──────────────┴──────────────┴─────┐                      │
-│  │      janus-server-I (:8080)         │                      │
+│  │      janus-server-i (:8080)         │                      │
 │  │      WS receive → WS forward (Nacos)   │                      │
 │  └────────────────────────────────────────┘                      │
 │  ┌────────────────────────────────────────┐                      │
-│  │      janus-server-II (:8080)         │                      │
+│  │      janus-server-ii (:8080)         │                      │
 │  │      WS receive → gRPC forward (etcd)  │                      │
 │  └────────────────────────────────────────┘                      │
 │  ┌────────────────────────────────────────┐                      │
-│  │      janus-server-III (:9090)         │                      │
+│  │      janus-server-iii (:9090)         │                      │
 │  │      gRPC receive → local process      │                      │
 │  └────────────────────────────────────────┘                      │
 │                                                                  │
@@ -303,23 +313,17 @@ Grafana 自动配置三个数据源：
 
 ## 8. 环境变量配置
 
-| 环境变量 | 默认值 | 说明 |
-|---------|--------|------|
-| `JANUS_SERVER_ID` | janus-&lt;pid&gt; | 服务器实例 ID（未设置时默认取进程 PID） |
-| `JANUS_WS_PORT` | 8080 | WebSocket 服务端口 |
-| `JANUS_GRPC_PORT` | 9090 | gRPC 服务端口 |
-| `JANUS_METRICS_PORT` | 9100 | Prometheus 指标端口 |
-| `JANUS_ADVERTISED_HOST` | localhost | 注册到发现中心的地址 |
-| `JANUS_DOWNSTREAM_PROTOCOL` | none | 下游协议：ws / grpc / none |
-| `JANUS_DOWNSTREAM_DISCOVERY` | none | 下游发现：nacos / etcd / none |
-| `JANUS_DOWNSTREAM_SERVICE` | janus-server | 下游服务名 |
-| `JANUS_REGISTER` | none | 注册中心：nacos / etcd / none |
-| `JANUS_NACOS_ENDPOINT` | localhost:8848 | Nacos 地址 |
-| `JANUS_ETCD_ENDPOINT` | http://localhost:2379 | etcd 地址 |
-| `JANUS_OTEL_ENABLED` | Y | 是否启用 OpenTelemetry |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | http://localhost:4317 | OTLP 端点 |
-| `OTEL_SERVICE_NAME` | janus | 服务名称（代码自动追加 `-{SERVER_ID}`） |
-| `JANUS_AUTH_TOKEN` | （空） | 可选的 WebSocket 共享令牌鉴权。留空（默认）时保持开放不校验；设置后入站 WS 握手须携带匹配的 `authToken` 请求头，下游 WS 转发客户端亦自动携带 |
+**完整的环境变量清单（含端口、发现、可观测性、并发调优、优雅下线、TLS、鉴权等全部变量及默认值）以 [README「环境变量」](../README.md#环境变量) 为准**，此处不再重复以避免文档漂移。
+
+架构层面只需理解一件事：**同一份代码通过下面三个变量塑造出入口 / 中间 / 终端三种角色**（判定逻辑见 [`ServerConfig`](../src/main/java/org/janus/config/ServerConfig.java)，运行期分发见 [§5.4](#54-chainhandler-链路编排)）。
+
+| 环境变量 | 取值 | 作用 |
+|---------|------|------|
+| `JANUS_DOWNSTREAM_PROTOCOL` | `ws` / `grpc` / `none` | 向下游转发使用的协议（`none` = 终端节点，本地处理） |
+| `JANUS_DOWNSTREAM_DISCOVERY` | `nacos` / `etcd` / `none` | 用哪个注册中心**发现**下游 |
+| `JANUS_REGISTER` | `nacos` / `etcd` / `none` | 把自己**注册**到哪个注册中心 |
+
+> 三节点的角色配置对照见 [使用指南 §5.3](guide.md#53-本地多节点链路运行) 与 [Cookbook §1.1](cookbook.md#11-角色由环境变量塑造)。
 
 ---
 

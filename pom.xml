@@ -23,7 +23,6 @@
         <jackson.version>2.18.2</jackson.version>
         <log4j.version>2.26.1</log4j.version>
         <java-websocket.version>1.5.7</java-websocket.version>
-        <lombok.version>1.18.46</lombok.version>
         <guava.version>33.6.0-jre</guava.version>
         <slf4j.version>2.0.16</slf4j.version>
 
@@ -58,13 +57,6 @@
     </dependencyManagement>
 
     <dependencies>
-        <dependency>
-            <groupId>org.projectlombok</groupId>
-            <artifactId>lombok</artifactId>
-            <version>${lombok.version}</version>
-            <scope>provided</scope>
-        </dependency>
-
         <!-- gRPC -->
         <dependency>
             <groupId>io.grpc</groupId>
@@ -277,13 +269,6 @@
                     <encoding>UTF-8</encoding>
                     <source>${jdk.version}</source>
                     <target>${jdk.version}</target>
-                    <annotationProcessorPaths>
-                        <path>
-                            <groupId>org.projectlombok</groupId>
-                            <artifactId>lombok</artifactId>
-                            <version>${lombok.version}</version>
-                        </path>
-                    </annotationProcessorPaths>
                 </configuration>
             </plugin>
             <plugin>
@@ -325,8 +310,35 @@
                         </goals>
                         <configuration>
                             <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <filters>
+                                <filter>
+                                    <!-- The shaded uber-jar runs on the classpath, not the
+                                         module path, so per-dependency module descriptors are
+                                         meaningless here and merging them breaks strong
+                                         encapsulation. Also drop signature files (invalid once
+                                         repackaged) and unmergeable build metadata. -->
+                                    <artifact>*:*</artifact>
+                                    <excludes>
+                                        <exclude>module-info.class</exclude>
+                                        <exclude>META-INF/versions/*/module-info.class</exclude>
+                                        <exclude>META-INF/*.SF</exclude>
+                                        <exclude>META-INF/*.DSA</exclude>
+                                        <exclude>META-INF/*.RSA</exclude>
+                                        <exclude>META-INF/DEPENDENCIES</exclude>
+                                        <exclude>META-INF/io.netty.versions.properties</exclude>
+                                        <exclude>META-INF/versions/*/OSGI-INF/MANIFEST.MF</exclude>
+                                        <!-- Drop per-dependency manifests: the
+                                             ManifestResourceTransformer below always writes the
+                                             final uber-jar manifest (Main-Class, Multi-Release),
+                                             so the inputs are redundant and only cause overlap. -->
+                                        <exclude>META-INF/MANIFEST.MF</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
                             <transformers>
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ApacheLicenseResourceTransformer"/>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ApacheNoticeResourceTransformer"/>
                                 <transformer implementation="com.github.edwgiz.maven_shade_plugin.log4j2_cache_transformer.PluginsCacheFileTransformer"/>
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
                                     <mainClass>org.janus.JanusServer</mainClass>

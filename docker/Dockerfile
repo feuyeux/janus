@@ -1,6 +1,7 @@
 FROM maven:3.9-eclipse-temurin-25 AS build-base
 WORKDIR /app
 
+COPY docker/settings.xml /root/.m2/settings.xml
 COPY pom.xml /app/pom.xml
 COPY src /app/src
 

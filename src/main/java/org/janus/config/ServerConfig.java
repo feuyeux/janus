@@ -70,6 +70,14 @@ public class ServerConfig {
     public static final int WS_POOL_SIZE = Math.max(1, getIntEnv("JANUS_WS_POOL_SIZE", 8));
     // Per-request timeout (ms) for a downstream WS round-trip.
     public static final long WS_FORWARD_TIMEOUT_MS = getLongEnv("JANUS_WS_FORWARD_TIMEOUT_MS", 10_000L);
+    // Fast dead-connection detection for both the WS server and the multiplexed
+    // WS forwarding links. Java-WebSocket periodically sends protocol-level ping
+    // frames and closes a connection if no pong arrives within this window. A
+    // value smaller than the library default (60s) surfaces half-open/partitioned
+    // peers quickly, so the pool can evict and reconnect and callers fail fast
+    // instead of writing into a black hole. 0 disables the library's lost-
+    // connection detection entirely.
+    public static final int WS_CONN_LOST_TIMEOUT_SEC = getIntEnv("JANUS_WS_CONN_LOST_TIMEOUT_SEC", 20);
     // Upper bound for the fallback platform-thread handler pools (ignored when
     // virtual threads are available at runtime).
     public static final int HANDLER_MAX_THREADS = getIntEnv("JANUS_HANDLER_MAX_THREADS", 512);
@@ -83,6 +91,14 @@ public class ServerConfig {
     // hardened deployments to reduce information exposure.
     public static final boolean GRPC_REFLECTION_ENABLED =
             "Y".equalsIgnoreCase(getEnv("JANUS_GRPC_REFLECTION", "Y"));
+
+    // ── Graceful shutdown ──────────────────────────────────────────────────────
+    // Drain window (ms) applied on shutdown AFTER deregistering from discovery and
+    // BEFORE closing the inbound listeners: it gives upstreams time to observe the
+    // deregistration (etcd DELETE / Nacos deregister) and lets in-flight requests
+    // finish, so stopping a node does not surface errors to callers. 0 disables the
+    // pause (useful for fast local restarts / tests).
+    public static final long SHUTDOWN_DRAIN_MS = getLongEnv("JANUS_SHUTDOWN_DRAIN_MS", 2000L);
 
     // ── Optional TLS (opt-in; disabled by default, so the plaintext demo stack
     // and tests are unaffected) ────────────────────────────────────────────────

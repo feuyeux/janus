@@ -53,8 +53,11 @@ public class ChainHandler {
         try {
             request = objectMapper.readValue(jsonRequest, JanusMessage.class);
         } catch (Exception e) {
-            // Unparseable frame — no correlation id recoverable.
-            log.error("Error parsing JSON request", e);
+            // Unparseable frame — a client-side fault, not a server error. Log at
+            // WARN with just the message (no stack trace): the exception carries no
+            // actionable server-side diagnostics, and dumping a full trace only
+            // pollutes the logs for every malformed frame.
+            log.warn("Discarding unparseable JSON request: {}", e.getMessage());
             return safeErrorJson(null, e);
         }
 
@@ -145,13 +148,27 @@ public class ChainHandler {
     // ═══════════════════════════════════════════════════════════════════════
 
     private JanusMessage route(JanusMessage request, Map<String, String> traceContext, Span parentSpan) {
-        if (ServerConfig.isGrpcDownstream() && grpcClient != null && grpcClient.isConnected()) {
-            return forwardViaGrpc(request, traceContext, parentSpan);
-        } else if (ServerConfig.isWsDownstream() && wsClient != null && wsClient.isConnected()) {
-            return forwardViaWs(request, traceContext, parentSpan);
-        } else {
-            return processLocally(request);
+        String method = request.method() != null ? request.method() : JanusMessage.METHOD_TALK;
+        // A node configured to forward must NOT silently answer locally when its
+        // downstream is unavailable: doing so masks the outage and returns a
+        // fabricated local result to the caller. Surface a 503 error envelope
+        // instead so the failure propagates back up the chain. Local processing
+        // is reserved for terminal nodes (no downstream configured).
+        if (ServerConfig.isGrpcDownstream()) {
+            if (grpcClient != null && grpcClient.isConnected()) {
+                return forwardViaGrpc(request, traceContext, parentSpan);
+            }
+            log.warn("gRPC downstream configured but unavailable [{}]; returning 503", method);
+            return JanusMessage.error(method, 503, "downstream gRPC unavailable");
         }
+        if (ServerConfig.isWsDownstream()) {
+            if (wsClient != null && wsClient.isConnected()) {
+                return forwardViaWs(request, traceContext, parentSpan);
+            }
+            log.warn("WS downstream configured but unavailable [{}]; returning 503", method);
+            return JanusMessage.error(method, 503, "downstream WS unavailable");
+        }
+        return processLocally(request);
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -173,7 +190,7 @@ public class ChainHandler {
                     .setStreamEnd(request.streamEnd() != null ? request.streamEnd() : true)
                     .build();
 
-            log.info("Forwarding via gRPC [{}]: data={}, meta={}", request.method(), grpcRequest.getData(), grpcRequest.getMeta());
+            log.debug("Forwarding via gRPC [{}]: data={}, meta={}", request.method(), grpcRequest.getData(), grpcRequest.getMeta());
 
             return switch (request.method() != null ? request.method() : JanusMessage.METHOD_TALK) {
                 case JanusMessage.METHOD_TALK_ONE_ANSWER_MORE -> {
@@ -231,7 +248,7 @@ public class ChainHandler {
             // match the reply to this in-flight request.
             JanusMessage outbound = request.withTrace(traceId, spanId).withRequestId(correlationId);
             String jsonRequest = objectMapper.writeValueAsString(outbound);
-            log.info("Forwarding via WS [{}] corr={}: data={}, meta={}",
+            log.debug("Forwarding via WS [{}] corr={}: data={}, meta={}",
                     request.method(), correlationId, request.data(), request.meta());
             String jsonResponse = wsClient.forward(correlationId, jsonRequest);
             return objectMapper.readValue(jsonResponse, JanusMessage.class);
@@ -251,7 +268,7 @@ public class ChainHandler {
         String data = request.data() != null ? request.data() : "0";
         String meta = request.meta() != null ? request.meta() : "JAVA";
 
-        log.info("Processing locally [{}]: data={}, meta={}", method, data, meta);
+        log.debug("Processing locally [{}]: data={}, meta={}", method, data, meta);
 
         return switch (method) {
             case JanusMessage.METHOD_TALK_ONE_ANSWER_MORE -> {

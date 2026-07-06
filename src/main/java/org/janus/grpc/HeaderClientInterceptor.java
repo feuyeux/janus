@@ -24,7 +24,7 @@ public class HeaderClientInterceptor implements ClientInterceptor {
                         String metadata = k.get();
                         if (metadata != null) {
                             Metadata.Key<String> key = Constants.TRACING_KEYS.get(i);
-                            log.info("<-T {}:{}", key, metadata);
+                            log.debug("<-T {}:{}", key, metadata);
                             headers.put(key, metadata);
                         }
                     }
@@ -34,7 +34,7 @@ public class HeaderClientInterceptor implements ClientInterceptor {
                                 responseListener) {
                             @Override
                             public void onHeaders(Metadata headers) {
-                                log.info("<-H {}", headers);
+                                log.debug("<-H {}", headers);
                                 super.onHeaders(headers);
                             }
                         },

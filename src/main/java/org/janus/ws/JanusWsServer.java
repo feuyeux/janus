@@ -20,6 +20,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
 
 /**
  * WebSocket server supporting both JSON and Binary protocols.
@@ -44,6 +45,12 @@ public class JanusWsServer extends WebSocketServer {
         this.handlerExecutor = ExecutorSupport.newHandlerExecutor("ws-handler", ServerConfig.HANDLER_MAX_THREADS);
         // Decode/read threads should not block on request processing.
         setReuseAddr(true);
+        // Protocol-level ping/pong liveness: close a connection whose peer stops
+        // answering within this window, so half-open/partitioned links are shed
+        // quickly instead of lingering until the library's 60s default.
+        if (ServerConfig.WS_CONN_LOST_TIMEOUT_SEC > 0) {
+            setConnectionLostTimeout(ServerConfig.WS_CONN_LOST_TIMEOUT_SEC);
+        }
         // Opt-in TLS (wss). Fail fast on misconfiguration rather than serving ws.
         if (ServerConfig.tlsEnabled()) {
             try {
@@ -90,7 +97,7 @@ public class JanusWsServer extends WebSocketServer {
         Session session = conn.getAttachment();
         if (session == null) return;
 
-        log.info("[{}] JSON message: {}", session.userId, message);
+        log.debug("[{}] JSON message: {}", session.userId, message);
         OtelSupport.recordWsMessage("json-text");
 
         // Offload processing (may block on downstream) off the WS read thread.
@@ -100,7 +107,7 @@ public class JanusWsServer extends WebSocketServer {
                 try {
                     String response = chainHandler.handleJsonRequest(message, traceContext);
                     conn.send(response);
-                    log.info("[{}] JSON response sent", session.userId);
+                    log.debug("[{}] JSON response sent", session.userId);
                 } catch (Exception e) {
                     log.error("[{}] Error processing JSON message", session.userId, e);
                 }
@@ -142,7 +149,7 @@ public class JanusWsServer extends WebSocketServer {
             OtelSupport.recordWsMessage("binary-" + BinaryCodec.MSG_JANUS);
             try {
                 BinaryCodec.JanusFrame frame = BinaryCodec.decodeJanus(data);
-                log.info("[{}] MSG_JANUS method={} mode={} seq={} data={}",
+                log.debug("[{}] MSG_JANUS method={} mode={} seq={} data={}",
                         session.userId, frame.method(), frame.mode(), frame.seq(), frame.data());
                 byte[] response = chainHandler.handleBinaryJanus(frame);
                 conn.send(response);
@@ -167,11 +174,11 @@ public class JanusWsServer extends WebSocketServer {
         switch (msg.type) {
             case BinaryCodec.MSG_HELLO -> {
                 session.clientLanguage = msg.clientLanguage;
-                log.info("[{}] HELLO from {}", session.userId, msg.clientLanguage);
+                log.debug("[{}] HELLO from {}", session.userId, msg.clientLanguage);
                 conn.send(BinaryCodec.bonjour("JANUS-JAVA").encode());
             }
             case BinaryCodec.MSG_ECHO_REQUEST -> {
-                log.info("[{}] ECHO_REQUEST id={} meta={} data={}", session.userId, msg.echoId, msg.echoMeta, msg.echoData);
+                log.debug("[{}] ECHO_REQUEST id={} meta={} data={}", session.userId, msg.echoId, msg.echoMeta, msg.echoData);
                 byte[] response = chainHandler.handleBinaryEcho(
                         msg.echoId, msg.echoMeta, msg.echoData, msg.traceId, msg.spanId);
                 conn.send(response);
@@ -213,7 +220,17 @@ public class JanusWsServer extends WebSocketServer {
         try {
             super.stop(timeout);
         } finally {
+            // Let in-flight handler tasks finish draining before forcing shutdown,
+            // bounded by the same timeout so we never hang stop().
             handlerExecutor.shutdown();
+            try {
+                if (!handlerExecutor.awaitTermination(timeout, TimeUnit.MILLISECONDS)) {
+                    handlerExecutor.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                handlerExecutor.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
         }
     }
 

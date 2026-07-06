@@ -10,7 +10,6 @@ import org.janus.proto.TalkRequest;
 import org.janus.proto.TalkResponse;
 import org.janus.proto.TalkResult;
 import org.janus.proto.JanusServiceGrpc;
-import lombok.Setter;
 
 import java.util.*;
 
@@ -21,16 +20,24 @@ import java.util.*;
 public class JanusServiceImpl extends JanusServiceGrpc.JanusServiceImplBase {
     private static final Logger log = LoggerFactory.getLogger(JanusServiceImpl.class);
 
-    @Setter private JanusServiceGrpc.JanusServiceBlockingStub blockingStub;
-    @Setter private JanusServiceGrpc.JanusServiceStub asyncStub;
+    private JanusServiceGrpc.JanusServiceBlockingStub blockingStub;
+    private JanusServiceGrpc.JanusServiceStub asyncStub;
 
     public JanusServiceImpl() {}
+
+    public void setBlockingStub(JanusServiceGrpc.JanusServiceBlockingStub blockingStub) {
+        this.blockingStub = blockingStub;
+    }
+
+    public void setAsyncStub(JanusServiceGrpc.JanusServiceStub asyncStub) {
+        this.asyncStub = asyncStub;
+    }
 
     // ─── Unary RPC ────────────────────────────────────────────────────────────
 
     @Override
     public void talk(TalkRequest request, StreamObserver<TalkResponse> responseObserver) {
-        log.info("Unary call - data: {}, meta: {}, trace: {}", request.getData(), request.getMeta(), request.getTraceId());
+        log.debug("Unary call - data: {}, meta: {}, trace: {}", request.getData(), request.getMeta(), request.getTraceId());
         OtelSupport.recordRpcCall("Talk");
 
         TalkResponse response;
@@ -53,7 +60,7 @@ public class JanusServiceImpl extends JanusServiceGrpc.JanusServiceImplBase {
 
     @Override
     public void talkOneAnswerMore(TalkRequest request, StreamObserver<TalkResponse> responseObserver) {
-        log.info("Server streaming - data: {}, meta: {}", request.getData(), request.getMeta());
+        log.debug("Server streaming - data: {}, meta: {}", request.getData(), request.getMeta());
         OtelSupport.recordRpcCall("TalkOneAnswerMore");
 
         if (blockingStub == null) {
@@ -88,7 +95,7 @@ public class JanusServiceImpl extends JanusServiceGrpc.JanusServiceImplBase {
 
                 @Override
                 public void onNext(TalkRequest request) {
-                    log.info("Client streaming - data: {}, meta: {}", request.getData(), request.getMeta());
+                    log.debug("Client streaming - data: {}, meta: {}", request.getData(), request.getMeta());
                     results.add(createResult(request.getData(), request.getMeta()));
                 }
 
@@ -116,7 +123,7 @@ public class JanusServiceImpl extends JanusServiceGrpc.JanusServiceImplBase {
             return new StreamObserver<>() {
                 @Override
                 public void onNext(TalkRequest request) {
-                    log.info("Client streaming (forwarding) - data: {}", request.getData());
+                    log.debug("Client streaming (forwarding) - data: {}", request.getData());
                     requestObserver.onNext(request);
                 }
 
@@ -144,7 +151,7 @@ public class JanusServiceImpl extends JanusServiceGrpc.JanusServiceImplBase {
             return new StreamObserver<>() {
                 @Override
                 public void onNext(TalkRequest request) {
-                    log.info("Bidi streaming - data: {}, meta: {}", request.getData(), request.getMeta());
+                    log.debug("Bidi streaming - data: {}, meta: {}", request.getData(), request.getMeta());
                     TalkResponse response = TalkResponse.newBuilder()
                             .setStatus(200)
                             .addResults(createResult(request.getData(), request.getMeta()))
@@ -171,7 +178,7 @@ public class JanusServiceImpl extends JanusServiceGrpc.JanusServiceImplBase {
             return new StreamObserver<>() {
                 @Override
                 public void onNext(TalkRequest request) {
-                    log.info("Bidi streaming (forwarding) - data: {}", request.getData());
+                    log.debug("Bidi streaming (forwarding) - data: {}", request.getData());
                     requestObserver.onNext(request);
                 }
 

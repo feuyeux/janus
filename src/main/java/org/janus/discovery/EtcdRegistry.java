@@ -98,7 +98,7 @@ public class EtcdRegistry implements ServiceRegistry {
                 String protocol = valStr.contains("|") ? valStr.split("\\|")[0] : "grpc";
                 result.add(new ServiceInstance(uri.getHost(), uri.getPort(), protocol));
             }
-            log.info("Discovered {} instances for [{}] in etcd", result.size(), serviceName);
+            log.debug("Discovered {} instances for [{}] in etcd", result.size(), serviceName);
         } catch (Exception e) {
             log.error("Failed to discover in etcd", e);
         }

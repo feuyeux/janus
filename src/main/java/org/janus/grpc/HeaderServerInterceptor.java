@@ -22,7 +22,7 @@ public class HeaderServerInterceptor implements ServerInterceptor {
             String metadata = requestHeaders.get(tracingKey);
             if (metadata != null) {
                 Context.Key<String> key = Constants.CONTEXT_KEYS.get(i);
-                log.info("->T {}:{}", key, metadata);
+                log.debug("->T {}:{}", key, metadata);
                 current = current.withValue(key, metadata);
             }
         }

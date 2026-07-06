@@ -9,7 +9,7 @@
 ## 特性
 
 - **多协议统一**：WebSocket JSON、WebSocket Binary、gRPC 三种传输协议共享同一逻辑消息模型，任意协议接收的请求可透明转发至其他协议
-- **4 种 gRPC 通信模型**：Unary、Server Streaming、Client Streaming、Bidirectional Streaming
+- **4 种 gRPC 通信模型**：Unary、Server Streaming、Client Streaming、Bidirectional Streaming（完整的流式语义在原生 gRPC 入口路径上保留；经 WS 入口桥接到 gRPC 时，客户端流 / 双向流会收敛为一元调用，详见 [协议规范](doc/protocol.md#63-转换规则)）
 - **服务注册与发现**：支持 Nacos 和 etcd，gRPC 客户端内置自定义 NameResolver 实现自动负载均衡
 - **全链路可观测**：OpenTelemetry SDK 统一 Tracing（Jaeger）、Metrics（Prometheus）、Logging（Loki + Promtail），Grafana 一站式查询
 - **单代码多角色**：所有节点运行同一份代码，通过环境变量配置不同角色（入口 / 中间 / 终端节点）
@@ -52,17 +52,17 @@ docker compose -f docker/docker-compose.yml --project-directory . up --build
 
 ```bash
 docker compose -f docker/docker-compose.yml --project-directory . ps
-docker compose -f docker/docker-compose.yml --project-directory . logs janus-server-I
+docker compose -f docker/docker-compose.yml --project-directory . logs janus-server-i
 ```
 
 启动成功后输出：
 
 ```
 ║ Janus Server started successfully
-║   WebSocket:  ws://janus-server-I:8080/json  (JSON mode)
-║   WebSocket:  ws://janus-server-I:8080/binary (Binary mode)
-║   gRPC:       janus-server-I:9090
-║   Metrics:    http://janus-server-I:9100/metrics
+║   WebSocket:  ws://janus-server-i:8080/json  (JSON mode)
+║   WebSocket:  ws://janus-server-i:8080/binary (Binary mode)
+║   gRPC:       janus-server-i:9090
+║   Metrics:    http://janus-server-i:9100/metrics
 ```
 
 ### 发送请求
@@ -131,7 +131,7 @@ src/main/java/org/janus/
 
 ### Grafana 统一查询
 
-访问 `http://localhost:3000`（admin / admin），预配置三个数据源：
+访问 `http://localhost:3000`（admin / admin adminADMIN），预配置三个数据源：
 
 - **Loki** — `{service=~"janus-server.*"}` 查询日志
 - **Prometheus** — `rate(rpc_calls_total[1m])` 查询指标
@@ -179,9 +179,9 @@ docker run -d --name jaeger -p 16686:16686 -p 4317:4317 \
 
 | 服务 | 宿主机端口 | 用途 |
 |------|-----------|------|
-| janus-server-I | **8080** / 9091 / 9101 | WS 入口 / gRPC / Metrics |
-| janus-server-II | 8081 / 9092 / 9102 | WS / gRPC / Metrics |
-| janus-server-III | 8082 / 9093 / 9103 | WS / gRPC / Metrics |
+| janus-server-i | **8080** / 9091 / 9101 | WS 入口 / gRPC / Metrics |
+| janus-server-ii | 8081 / 9092 / 9102 | WS / gRPC / Metrics |
+| janus-server-iii | 8082 / 9093 / 9103 | WS / gRPC / Metrics |
 | Nacos | **8848** | 控制台 |
 | etcd | **2379** | API |
 | Jaeger | **16686** | UI |
@@ -209,6 +209,8 @@ docker run -d --name jaeger -p 16686:16686 -p 4317:4317 \
 | `JANUS_AUTH_TOKEN` | （空） | 可选的 WebSocket 共享令牌鉴权。留空（默认）时不校验；设置后，入站 WS 握手必须携带匹配的 `authToken` 请求头，下游 WS 转发客户端也会自动带上该头（比较为常量时间，避免时序侧信道） |
 | `JANUS_WS_POOL_SIZE` | 8 | 下游 WS 转发连接池大小。每条连接以 `request_id` 多路复用大量并发在途请求；连接按轮询分散到已发现的下游实例 |
 | `JANUS_WS_FORWARD_TIMEOUT_MS` | 10000 | 单次下游 WS 往返超时（毫秒） |
+| `JANUS_WS_CONN_LOST_TIMEOUT_SEC` | 20 | WS 连接探活窗口（秒）。服务端与转发连接池按此周期发送协议级 ping，超时无 pong 即关闭连接，加快半开/分区连接的探测与重连（库默认 60s）。设为 0 关闭该检测 |
+| `JANUS_SHUTDOWN_DRAIN_MS` | 2000 | 优雅下线排空窗口（毫秒）。在从注册中心注销之后、关闭入站监听之前暂停，让上游感知注销、在途请求完成，避免停机瞬间给上游制造错误。设为 0 关闭（快速重启/测试） |
 | `JANUS_HANDLER_MAX_THREADS` | 512 | 处理线程池上限（仅在无虚拟线程的旧 JDK 回退时生效；JDK 21+ 使用虚拟线程） |
 | `JANUS_GRPC_MAX_INBOUND_MSG` | 16777216 | gRPC 最大入站消息字节数 |
 | `JANUS_GRPC_MAX_CONCURRENT_CALLS` | 0 | 单连接最大并发调用数（0 表示不限制） |

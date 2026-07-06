@@ -392,14 +392,17 @@ gRPC 请求通过 Metadata 传播链路追踪上下文：
 1. 解析 JSON → JanusEnvelope
 2. 根据 method 选择 gRPC 方法：
    TALK                  → blockingStub.talk(request)
-   TALK_ONE_ANSWER_MORE  → blockingStub.talkOneAnswerMore(request) → 遍历响应
-   TALK_MORE_ANSWER_ONE  → asyncStub.talkMoreAnswerOne(responseObserver)
-                           → 逐条发送，最后一条 stream_end=true 时半关闭
-   TALK_BIDIRECTIONAL    → asyncStub.talkBidirectional(responseObserver)
-                           → 逐条发送，stream_end=true 时半关闭
+   TALK_ONE_ANSWER_MORE  → blockingStub.talkOneAnswerMore(request) → 遍历响应并聚合
+   TALK_MORE_ANSWER_ONE  → blockingStub.talk(request)   ⚠️ 收敛为一元（见下方限制）
+   TALK_BIDIRECTIONAL    → blockingStub.talk(request)   ⚠️ 收敛为一元（见下方限制）
 3. 将 trace_id/span_id 填入 TalkRequest
 4. gRPC 响应 → JanusEnvelope (mode=RESPONSE)
 ```
+
+> **⚠️ 限制：WS 入口的客户端流 / 双向流会被收敛为一元调用。**
+> WS→gRPC 桥接在 `ChainHandler` 每次只处理**一个**逻辑消息（WS 文本/二进制帧无法承载真正的多消息流），因此无法回放一个真正的客户端流。对于 `TALK_MORE_ANSWER_ONE`（客户端流）与 `TALK_BIDIRECTIONAL`（双向流），桥接层退化为单次 `talk()` 一元调用（一进一出）。
+> 服务端流 `TALK_ONE_ANSWER_MORE` 会正常遍历下游流式响应并聚合为一个 JSON 响应帧返回。
+> **真正的四种流式语义仅在原生 gRPC 入口路径（gRPC → gRPC）上完整保留**，此时 `JanusServiceImpl` 使用 `asyncStub` 逐条转发请求/响应并在 `stream_end=true` 时半关闭。
 
 #### gRPC → WS JSON
 
@@ -608,11 +611,11 @@ grpcurl -plaintext -d @ localhost:9091 janus.JanusService/TalkBidirectional
 curl http://localhost:9101/metrics
 
 # Jaeger 查询 Trace
-curl 'http://localhost:16686/api/traces?service=janus-server-I&limit=5'
+curl 'http://localhost:16686/api/traces?service=janus-server-i&limit=5'
 
 # Loki 查询日志
 curl -G 'http://localhost:3100/loki/api/v1/query_range' \
-  --data-urlencode 'query={container_name="janus-server-I"}' --data-urlencode 'limit=10'
+  --data-urlencode 'query={container_name="janus-server-i"}' --data-urlencode 'limit=10'
 
 # Grafana API
 curl -u admin:admin http://localhost:3000/api/datasources

@@ -60,7 +60,7 @@ public class NacosRegistry implements ServiceRegistry {
                 String protocol = inst.getMetadata().getOrDefault("protocol", "ws");
                 result.add(new ServiceInstance(inst.getIp(), inst.getPort(), protocol));
             }
-            log.info("Discovered {} healthy instances for [{}] in Nacos", result.size(), serviceName);
+            log.debug("Discovered {} healthy instances for [{}] in Nacos", result.size(), serviceName);
             return result;
         } catch (NacosException e) {
             log.error("Failed to discover in Nacos: {}", e.getMessage());
