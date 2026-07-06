@@ -46,8 +46,24 @@ public class ServerConfig {
     public static final String DOWNSTREAM_PROTOCOL = getEnv("JANUS_DOWNSTREAM_PROTOCOL", "none"); // ws, grpc, none
     public static final String DOWNSTREAM_DISCOVERY = getEnv("JANUS_DOWNSTREAM_DISCOVERY", "none"); // nacos, etcd, none
     public static final String DOWNSTREAM_SERVICE = getEnv("JANUS_DOWNSTREAM_SERVICE", SVC_DISC_NAME);
+    // Wire encoding used by the WS forwarding client: "json" (text frames on
+    // /json) or "binary" (MSG_JANUS frames on /binary). Only meaningful when
+    // DOWNSTREAM_PROTOCOL=ws. Defaults to json.
+    public static final String DOWNSTREAM_WS_MODE = getEnv("JANUS_DOWNSTREAM_WS_MODE", "json"); // json, binary
+    // Which WS protocols this node's server accepts: "json" (only /json),
+    // "binary" (only /binary) or "both" (default). Lets a node advertise a single
+    // wire format — e.g. S1 json-only, S3 binary-only.
+    public static final String WS_MODE = getEnv("JANUS_WS_MODE", "both"); // json, binary, both
     // Registration
     public static final String REGISTER = getEnv("JANUS_REGISTER", "none"); // nacos, etcd, none
+    // Protocol this node advertises when registering — i.e. how its UPSTREAM
+    // reaches it. Decoupled from the registry type (nacos/etcd): with the
+    // gRPC-in→WS-out middle node, S2 registers in Nacos but is reached via gRPC,
+    // and S3 registers in etcd but is reached via WS. The advertised port follows
+    // this protocol (grpc → GRPC_PORT, ws → WS_PORT). Defaults preserve the
+    // historical coupling (etcd→grpc, nacos→ws) when left unset.
+    public static final String REGISTER_PROTOCOL = getEnv("JANUS_REGISTER_PROTOCOL",
+            "etcd".equalsIgnoreCase(REGISTER) ? "grpc" : "ws"); // ws, grpc
 
     // Discovery endpoints
     public static final String NACOS_ENDPOINT = getEnv("JANUS_NACOS_ENDPOINT", "localhost:8848");
@@ -161,6 +177,16 @@ public class ServerConfig {
         return "grpc".equalsIgnoreCase(DOWNSTREAM_PROTOCOL);
     }
 
+    /** WS server accepts JSON (/json). True unless restricted to binary-only. */
+    public static boolean wsJsonEnabled() {
+        return !"binary".equalsIgnoreCase(WS_MODE);
+    }
+
+    /** WS server accepts Binary (/binary). True unless restricted to json-only. */
+    public static boolean wsBinaryEnabled() {
+        return !"json".equalsIgnoreCase(WS_MODE);
+    }
+
     public static boolean isNacosDiscovery() {
         return "nacos".equalsIgnoreCase(DOWNSTREAM_DISCOVERY);
     }
@@ -175,5 +201,10 @@ public class ServerConfig {
 
     public static boolean registerEtcd() {
         return "etcd".equalsIgnoreCase(REGISTER);
+    }
+
+    /** True when this node advertises its gRPC endpoint to upstreams. */
+    public static boolean registerAsGrpc() {
+        return "grpc".equalsIgnoreCase(REGISTER_PROTOCOL);
     }
 }

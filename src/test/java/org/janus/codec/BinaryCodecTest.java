@@ -14,7 +14,7 @@ class BinaryCodecTest {
                 new BinaryCodec.EchoResult(42L, 0, Map.of("k", "v", "idx", "3"))
         };
         byte[] frame = BinaryCodec.encodeJanus(
-                1, 1, 5, false, 200, "data", "meta", "tid", "sid", "", results);
+                1, 1, 5, false, 200, "data", "meta", "tid", "sid", "", "corr-1", results);
 
         BinaryCodec.JanusFrame tf = BinaryCodec.decodeJanus(frame);
 
@@ -27,6 +27,7 @@ class BinaryCodecTest {
         assertEquals("meta", tf.meta());
         assertEquals("tid", tf.traceId());
         assertEquals("sid", tf.spanId());
+        assertEquals("corr-1", tf.requestId());
         assertEquals(1, tf.results().length);
         assertEquals(42L, tf.results()[0].idx());
         assertEquals("v", tf.results()[0].kv().get("k"));

@@ -97,16 +97,21 @@ public class ChainHandler {
         OtelSupport.recordWsMessage("binary-" + methodName);
 
         try {
-            // Convert binary frame to unified message
+            // Convert binary frame to unified message, preserving the per-hop
+            // correlation id so a multiplexed binary connection can match replies.
             JanusMessage request = new JanusMessage(
                     methodName,
                     frame.mode() == 0 ? JanusMessage.MODE_REQUEST : JanusMessage.MODE_RESPONSE,
                     frame.data(), frame.meta(),
                     null, null, null,
                     frame.traceId(), frame.spanId(),
-                    frame.seq(), frame.streamEnd(), null);
+                    frame.seq(), frame.streamEnd(), frame.requestId());
 
             JanusMessage response = route(request, traceContext, span);
+
+            // Echo back the correlation id we received so the upstream multiplexed
+            // binary client can match this reply to its in-flight request.
+            response = response.withRequestId(frame.requestId());
 
             // Convert response back to binary frame
             return envelopeToBinary(response);
@@ -114,7 +119,7 @@ public class ChainHandler {
             log.error("Error handling binary janus request", e);
             return BinaryCodec.encodeJanus(
                     frame.method(), 2, 0, true,
-                    500, "", "", "", "", e.getMessage(), null);
+                    500, "", "", "", "", e.getMessage(), frame.requestId(), null);
         } finally {
             tracingHelper.endSpan(span);
         }
@@ -138,6 +143,43 @@ public class ChainHandler {
                     JanusMessage.METHOD_TALK, data, meta, traceId, spanId, 0, true);
             JanusMessage response = route(request, traceContext, span);
             return envelopeToBinary(response);
+        } finally {
+            tracingHelper.endSpan(span);
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // gRPC entry point (native gRPC in → route to WS downstream or local)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Handle a request received on the native gRPC server and route it through
+     * the unified chain. This is what lets a middle node <em>receive via gRPC and
+     * forward via WebSocket</em> (S2 in the S1[WS→gRPC] → S2[gRPC→WS] → S3[WS→local]
+     * topology): the inbound {@link TalkRequest} is lifted into the unified
+     * envelope, routed (WS forward or local processing), then lowered back to a
+     * {@link TalkResponse}.
+     *
+     * <p>gRPC carries the method via the RPC name (not a field), so the caller
+     * passes it in explicitly.
+     */
+    public TalkResponse handleGrpcRequest(String method, TalkRequest request) {
+        Map<String, String> traceContext = new HashMap<>();
+        if (request.getTraceId() != null && !request.getTraceId().isEmpty()) {
+            String spanId = (request.getSpanId() != null && !request.getSpanId().isEmpty())
+                    ? request.getSpanId() : "0000000000000000";
+            traceContext.put("traceparent", "00-" + request.getTraceId() + "-" + spanId + "-01");
+        }
+
+        Span span = tracingHelper.startServerSpan("grpc-" + method, traceContext);
+        OtelSupport.recordRpcCall(method);
+        try {
+            JanusMessage envelope = JanusMessage.request(
+                    method, request.getData(), request.getMeta(),
+                    request.getTraceId(), request.getSpanId(),
+                    request.getSeq(), request.getStreamEnd());
+            JanusMessage response = route(envelope, traceContext, span);
+            return envelopeToTalkResponse(response);
         } finally {
             tracingHelper.endSpan(span);
         }
@@ -243,17 +285,31 @@ public class ChainHandler {
             String spanId = span.getSpanContext().getSpanId();
             String correlationId = UUID.randomUUID().toString();
             // Carry the client-span ids in the envelope so the downstream WS node
-            // rebuilds this span as its parent (WS text frames can't carry
-            // headers), plus a fresh correlation id so the multiplexed pool can
-            // match the reply to this in-flight request.
+            // rebuilds this span as its parent (WS frames can't carry headers),
+            // plus a fresh correlation id so the multiplexed pool can match the
+            // reply to this in-flight request.
             JanusMessage outbound = request.withTrace(traceId, spanId).withRequestId(correlationId);
+
+            if (wsClient.isBinary()) {
+                // Encode as a MSG_JANUS binary frame (the downstream, e.g. S3,
+                // only speaks binary). The requestId is carried in-frame so the
+                // multiplexed binary connection can correlate the reply.
+                byte[] reqBytes = envelopeToBinary(outbound);
+                log.debug("Forwarding via WS Binary [{}] corr={}: data={}, meta={}",
+                        request.method(), correlationId, request.data(), request.meta());
+                byte[] respBytes = wsClient.forwardBinary(correlationId, reqBytes);
+                return binaryFrameToEnvelope(BinaryCodec.decodeJanus(respBytes));
+            }
+
             String jsonRequest = objectMapper.writeValueAsString(outbound);
-            log.debug("Forwarding via WS [{}] corr={}: data={}, meta={}",
+            log.debug("Forwarding via WS JSON [{}] corr={}: data={}, meta={}",
                     request.method(), correlationId, request.data(), request.meta());
             String jsonResponse = wsClient.forward(correlationId, jsonRequest);
             return objectMapper.readValue(jsonResponse, JanusMessage.class);
         } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
             throw new RuntimeException("JSON serialization error during WS forward", e);
+        } catch (BinaryCodec.DecodeException e) {
+            throw new RuntimeException("Binary decode error during WS forward", e);
         } finally {
             tracingHelper.endSpan(span);
         }
@@ -316,6 +372,29 @@ public class ChainHandler {
         return results;
     }
 
+    /**
+     * Lower a unified response envelope back into a gRPC {@link TalkResponse}.
+     * Used by the native gRPC entry path when a middle node receives via gRPC and
+     * forwards via WebSocket (the WS round-trip returns an envelope, which is then
+     * handed back to the gRPC caller).
+     */
+    private TalkResponse envelopeToTalkResponse(JanusMessage msg) {
+        TalkResponse.Builder builder = TalkResponse.newBuilder()
+                .setStatus(msg.status() != null ? msg.status() : 200)
+                .setSeq(msg.seq() != null ? msg.seq() : 0)
+                .setStreamEnd(msg.streamEnd() != null ? msg.streamEnd() : true);
+        if (msg.results() != null) {
+            for (JanusMessage.JanusResult r : msg.results()) {
+                builder.addResults(TalkResult.newBuilder()
+                        .setId(r.id())
+                        .setType("FAIL".equals(r.type()) ? ResultType.FAIL : ResultType.OK)
+                        .putAllKv(r.kv() != null ? r.kv() : Map.of())
+                        .build());
+            }
+        }
+        return builder.build();
+    }
+
     private byte[] envelopeToBinary(JanusMessage msg) {
         int methodIdx = msg.methodIndex();
         int modeIdx = switch (msg.mode() != null ? msg.mode() : JanusMessage.MODE_RESPONSE) {
@@ -341,7 +420,34 @@ public class ChainHandler {
                 msg.status() != null ? msg.status() : 0,
                 msg.data(), msg.meta(),
                 msg.traceId(), msg.spanId(), msg.errorMsg(),
-                results);
+                msg.requestId(), results);
+    }
+
+    /**
+     * Lift a decoded MSG_JANUS binary frame back into the unified envelope. Used
+     * when a binary WS forwarding reply comes back from the downstream (S3), so
+     * the middle node can hand a normal {@link JanusMessage} to the rest of the
+     * chain.
+     */
+    static JanusMessage binaryFrameToEnvelope(BinaryCodec.JanusFrame frame) {
+        String method = JanusMessage.methodFromIndex(frame.method());
+        String mode = switch (frame.mode()) {
+            case 0 -> JanusMessage.MODE_REQUEST;
+            case 2 -> JanusMessage.MODE_ERROR;
+            default -> JanusMessage.MODE_RESPONSE;
+        };
+        List<JanusMessage.JanusResult> results = new ArrayList<>();
+        if (frame.results() != null) {
+            for (BinaryCodec.EchoResult r : frame.results()) {
+                results.add(new JanusMessage.JanusResult(
+                        r.idx(), r.type() == 1 ? "FAIL" : "OK",
+                        r.kv() != null ? r.kv() : Map.of()));
+            }
+        }
+        String errorMsg = (frame.errorMsg() != null && !frame.errorMsg().isEmpty()) ? frame.errorMsg() : null;
+        return new JanusMessage(method, mode, frame.data(), frame.meta(),
+                frame.status(), results.isEmpty() ? null : results, errorMsg,
+                frame.traceId(), frame.spanId(), frame.seq(), frame.streamEnd(), frame.requestId());
     }
 
     private JanusMessage.JanusResult createResult(String data, String meta) {

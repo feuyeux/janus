@@ -49,7 +49,13 @@ public class EtcdRegistry implements ServiceRegistry {
             long lease = etcd.getLeaseClient().grant(ServerConfig.ETCD_TTL).get().getID();
             leaseId.set(lease);
 
-            String uri = "grpc://" + host + ":" + port;
+            // The key scheme mirrors the advertised protocol. The etcd gRPC
+            // NameResolver only reads host:port from it (scheme-agnostic), while
+            // ServiceRegistry.discover() reads the protocol from the value below —
+            // so a WS-reachable node (protocol=ws) is stored and discovered
+            // correctly for the gRPC-in → WS-out topology.
+            String scheme = (protocol != null && !protocol.isEmpty()) ? protocol : "grpc";
+            String uri = scheme + "://" + host + ":" + port;
             registeredKey = serviceName + "/" + uri;
             ByteSequence key = ByteSequence.from(registeredKey, StandardCharsets.US_ASCII);
             ByteSequence value = ByteSequence.from(protocol + "|" + lease, StandardCharsets.US_ASCII);

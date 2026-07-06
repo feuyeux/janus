@@ -57,6 +57,9 @@ public class JanusWsClient {
     private final ServiceRegistry registry;
     private final int poolSize;
     private final long timeoutMs;
+    // When true, forward as MSG_JANUS binary frames on the /binary endpoint
+    // (the downstream only speaks binary); otherwise JSON text on /json.
+    private final boolean binaryMode;
 
     private final List<MultiplexClient> pool = new CopyOnWriteArrayList<>();
     private final AtomicInteger roundRobin = new AtomicInteger();
@@ -70,10 +73,20 @@ public class JanusWsClient {
     private volatile boolean maintainerStarted = false;
 
     public JanusWsClient(ServiceRegistry registry, String downstreamService) {
+        this(registry, downstreamService, ServerConfig.DOWNSTREAM_WS_MODE);
+    }
+
+    public JanusWsClient(ServiceRegistry registry, String downstreamService, String wsMode) {
         this.registry = registry;
         this.downstreamService = downstreamService;
         this.poolSize = ServerConfig.WS_POOL_SIZE;
         this.timeoutMs = ServerConfig.WS_FORWARD_TIMEOUT_MS;
+        this.binaryMode = "binary".equalsIgnoreCase(wsMode);
+    }
+
+    /** True when this client forwards using the WS Binary protocol. */
+    public boolean isBinary() {
+        return binaryMode;
     }
 
     /** Establish the pool synchronously once, then keep it healthy in the background. */
@@ -128,10 +141,11 @@ public class JanusWsClient {
         }
 
         String scheme = ServerConfig.tlsEnabled() ? "wss" : "ws";
+        String path = binaryMode ? "/binary" : "/json";
         int needed = poolSize - pool.size();
         for (int i = 0; i < needed; i++) {
             ServiceRegistry.ServiceInstance inst = instances.get(i % instances.size());
-            String url = scheme + "://" + inst.host() + ":" + inst.port() + "/json";
+            String url = scheme + "://" + inst.host() + ":" + inst.port() + path;
             MultiplexClient c = new MultiplexClient(URI.create(url));
             if (c.connectWithRetry(2)) {
                 pool.add(c);
@@ -162,6 +176,25 @@ public class JanusWsClient {
      * @throws RuntimeException on timeout, downstream error, or no available connection
      */
     public String forward(String correlationId, String jsonRequest) {
+        return (String) roundTripLoop(correlationId, jsonRequest);
+    }
+
+    /**
+     * Forward a MSG_JANUS binary frame and await the reply matching
+     * {@code correlationId}. The reply's raw bytes are returned for the caller to
+     * decode.
+     *
+     * @throws RuntimeException on timeout, downstream error, or no available connection
+     */
+    public byte[] forwardBinary(String correlationId, byte[] frame) {
+        return (byte[]) roundTripLoop(correlationId, frame);
+    }
+
+    /**
+     * Shared send/await/retry loop for both JSON (String payload) and Binary
+     * (byte[] payload) forwarding. The reply object type mirrors the request.
+     */
+    private Object roundTripLoop(String correlationId, Object payload) {
         NotSentException lastNotSent = null;
         for (int attempt = 0; attempt < 2; attempt++) {
             MultiplexClient client = pickHealthy();
@@ -170,7 +203,7 @@ public class JanusWsClient {
                 throw new RuntimeException("No downstream WS connection available");
             }
             try {
-                return client.roundTrip(correlationId, jsonRequest, timeoutMs);
+                return client.roundTrip(correlationId, payload, timeoutMs);
             } catch (TimeoutException te) {
                 // Sent but no reply in time — do not resend (may be processing).
                 throw new RuntimeException("Timeout waiting for downstream WS response (corr=" + correlationId + ")");
@@ -234,7 +267,7 @@ public class JanusWsClient {
     static class MultiplexClient extends WebSocketClient {
         private static final Logger log = LoggerFactory.getLogger(MultiplexClient.class);
 
-        private final ConcurrentHashMap<String, CompletableFuture<String>> pending = new ConcurrentHashMap<>();
+        private final ConcurrentHashMap<String, CompletableFuture<Object>> pending = new ConcurrentHashMap<>();
 
         MultiplexClient(URI serverUri) {
             super(serverUri);
@@ -282,12 +315,17 @@ public class JanusWsClient {
             return false;
         }
 
-        String roundTrip(String correlationId, String json, long timeoutMs)
+        Object roundTrip(String correlationId, Object payload, long timeoutMs)
                 throws InterruptedException, TimeoutException {
-            CompletableFuture<String> future = new CompletableFuture<>();
+            CompletableFuture<Object> future = new CompletableFuture<>();
             pending.put(correlationId, future);
             try {
-                send(json); // WebsocketNotConnectedException (unchecked) if the socket dropped
+                // WebsocketNotConnectedException (unchecked) if the socket dropped.
+                if (payload instanceof byte[] bytes) {
+                    send(bytes);
+                } else {
+                    send((String) payload);
+                }
             } catch (RuntimeException e) {
                 // Nothing was transmitted — retryable on another connection.
                 pending.remove(correlationId);
@@ -318,7 +356,7 @@ public class JanusWsClient {
                 log.warn("WS forward reply without request_id; dropping");
                 return;
             }
-            CompletableFuture<String> future = pending.remove(corrId);
+            CompletableFuture<Object> future = pending.remove(corrId);
             if (future != null) {
                 future.complete(message);
             } else {
@@ -328,7 +366,36 @@ public class JanusWsClient {
 
         @Override
         public void onMessage(ByteBuffer message) {
-            // Binary replies are not used on the JSON forwarding path.
+            // Binary forwarding reply: decode the MSG_JANUS frame just enough to
+            // read its correlation id, then hand the raw bytes to the waiter for
+            // full decoding.
+            byte[] bytes = new byte[message.remaining()];
+            message.get(bytes);
+            // The downstream greets new /binary connections with a BONJOUR frame
+            // (and may emit other non-JANUS control frames); ignore anything that
+            // is not a MSG_JANUS reply rather than logging it as an error.
+            if (bytes.length < BinaryCodec.HEADER_LEN || bytes[2] != BinaryCodec.MSG_JANUS) {
+                log.debug("WS forward: ignoring non-JANUS binary frame (type=0x{})",
+                        bytes.length >= BinaryCodec.HEADER_LEN ? String.format("%02x", bytes[2]) : "??");
+                return;
+            }
+            String corrId;
+            try {
+                corrId = BinaryCodec.decodeJanus(bytes).requestId();
+            } catch (BinaryCodec.DecodeException e) {
+                log.warn("WS forward binary reply undecodable; dropping: {}", e.getMessage());
+                return;
+            }
+            if (corrId == null || corrId.isEmpty()) {
+                log.warn("WS forward binary reply without request_id; dropping");
+                return;
+            }
+            CompletableFuture<Object> future = pending.remove(corrId);
+            if (future != null) {
+                future.complete(bytes);
+            } else {
+                log.warn("No pending WS request for corr={} (late/duplicate binary reply)", corrId);
+            }
         }
 
         @Override
@@ -344,8 +411,8 @@ public class JanusWsClient {
         }
 
         private void failAllPending(Throwable t) {
-            for (Map.Entry<String, CompletableFuture<String>> e : pending.entrySet()) {
-                CompletableFuture<String> f = pending.remove(e.getKey());
+            for (Map.Entry<String, CompletableFuture<Object>> e : pending.entrySet()) {
+                CompletableFuture<Object> f = pending.remove(e.getKey());
                 if (f != null) {
                     f.completeExceptionally(t);
                 }

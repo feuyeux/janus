@@ -82,6 +82,22 @@ public class JanusWsServer extends WebSocketServer {
         if (userId == null || userId.isEmpty()) {
             userId = "client-" + UUID.randomUUID().toString().substring(0, 8);
         }
+
+        // Enforce the node's advertised WS wire format: a json-only node rejects
+        // /binary handshakes and a binary-only node rejects /json, so S1 exposes
+        // JSON only and S3 exposes Binary only.
+        boolean wantsBinary = isBinaryPath(path);
+        if (wantsBinary && !ServerConfig.wsBinaryEnabled()) {
+            log.warn("[{}] Rejected WS handshake: binary not offered here (path={})", userId, path);
+            conn.close(CloseFrame.REFUSE, "binary not supported");
+            return;
+        }
+        if (!wantsBinary && !ServerConfig.wsJsonEnabled()) {
+            log.warn("[{}] Rejected WS handshake: json not offered here (path={})", userId, path);
+            conn.close(CloseFrame.REFUSE, "json not supported");
+            return;
+        }
+
         conn.setAttachment(new Session(userId, path));
         log.info("[{}] session+ path={}", userId, path);
         OtelSupport.recordWsMessage("connect");

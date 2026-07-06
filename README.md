@@ -9,7 +9,7 @@
 ## 特性
 
 - **多协议统一**：WebSocket JSON、WebSocket Binary、gRPC 三种传输协议共享同一逻辑消息模型，任意协议接收的请求可透明转发至其他协议
-- **4 种 gRPC 通信模型**：Unary、Server Streaming、Client Streaming、Bidirectional Streaming（完整的流式语义在原生 gRPC 入口路径上保留；经 WS 入口桥接到 gRPC 时，客户端流 / 双向流会收敛为一元调用，详见 [协议规范](doc/protocol.md#63-转换规则)）
+- **4 种 gRPC 通信模型**：Unary、Server Streaming、Client Streaming、Bidirectional Streaming（完整的流式语义在原生 gRPC 入口路径上保留；当 gRPC 入口桥接到 WS 下游转发时，客户端流 / 双向流会收敛为一元调用，详见 [协议规范](doc/protocol.md#63-转换规则)）
 - **服务注册与发现**：支持 Nacos 和 etcd，gRPC 客户端内置自定义 NameResolver 实现自动负载均衡
 - **全链路可观测**：OpenTelemetry SDK 统一 Tracing（Jaeger）、Metrics（Prometheus）、Logging（Loki + Promtail），Grafana 一站式查询
 - **单代码多角色**：所有节点运行同一份代码，通过环境变量配置不同角色（入口 / 中间 / 终端节点）
@@ -76,7 +76,7 @@ docker compose -f docker/docker-compose.yml --project-directory . logs janus-ser
 }
 ```
 
-请求经过完整链路：S1 (WS) → S2 (WS) → S3 (gRPC) → 本地处理 → 响应原路返回。
+请求经过完整链路：S1 (WS 接收 → gRPC 转发) → S2 (gRPC 接收 → WS 转发) → S3 (WS 接收 → 本地处理) → 响应原路返回。
 
 `data` 字段支持 0-5 的语言索引：
 
@@ -92,15 +92,17 @@ docker compose -f docker/docker-compose.yml --project-directory . logs janus-ser
 ## 架构
 
 ```
-Postman ──[WS JSON/Binary]──▶ S1 ──[Nacos 发现]──▶ S2 ──[etcd 发现]──▶ S3
-      (入口)                  (WS 转发)           (中间节点)           (gRPC 转发 → 本地处理)
+Postman ──[WS JSON]──▶ S1 ──[Nacos 发现]──▶ S2 ──[etcd 发现]──▶ S3
+    (入口)             (gRPC 转发)          (中间节点)         (WS Binary 转发 → 本地处理)
 ```
 
 | 节点 | 接收协议 | 转发协议 | 服务发现 | 服务注册 |
 |------|---------|---------|---------|---------|
-| S1 | WebSocket | WebSocket | Nacos | — |
-| S2 | WebSocket | gRPC | etcd | Nacos |
-| S3 | gRPC | — (本地处理) | — | etcd |
+| S1 | WebSocket JSON（仅 json） | gRPC | Nacos | — |
+| S2 | gRPC | WebSocket Binary | etcd | Nacos |
+| S3 | WebSocket Binary（仅 binary） | — (本地处理) | — | etcd |
+
+> 每个节点都同时内建 WS（JSON + Binary）与 gRPC 两种服务端，具体只提供哪种由 `JANUS_WS_MODE` 收敛：本链路 S1 只开放 `/json`（供 Postman），S3 只开放 `/binary`（供 S2）。S2 的下游 WS 转发编码由 `JANUS_DOWNSTREAM_WS_MODE=binary` 指定。
 
 ### 项目结构
 
@@ -198,9 +200,12 @@ docker run -d --name jaeger -p 16686:16686 -p 4317:4317 \
 | `JANUS_METRICS_PORT` | 9100 | Prometheus 指标端口 |
 | `JANUS_ADVERTISED_HOST` | localhost | 注册到发现中心的地址 |
 | `JANUS_DOWNSTREAM_PROTOCOL` | none | 下游协议：`ws` / `grpc` / `none` |
+| `JANUS_DOWNSTREAM_WS_MODE` | json | 下游 WS 转发的线路编码：`json`（文本帧，连 `/json`）/ `binary`（MSG_JANUS 帧，连 `/binary`）。仅当 `JANUS_DOWNSTREAM_PROTOCOL=ws` 时有效。本链路 S2 设为 `binary` |
+| `JANUS_WS_MODE` | both | 本节点 WS 服务端对外提供的协议：`json`（仅 `/json`）/ `binary`（仅 `/binary`）/ `both`。握手时拒绝未提供的路径。本链路 S1=`json`、S3=`binary` |
 | `JANUS_DOWNSTREAM_DISCOVERY` | none | 下游发现：`nacos` / `etcd` / `none` |
 | `JANUS_DOWNSTREAM_SERVICE` | janus-server | 下游服务名 |
 | `JANUS_REGISTER` | none | 注册中心：`nacos` / `etcd` / `none` |
+| `JANUS_REGISTER_PROTOCOL` | 由 `JANUS_REGISTER` 推导（etcd→`grpc`，其余→`ws`） | 本节点向注册中心公布的协议 / 端口，即上游以何协议访问本节点：`ws`（公布 WS 端口）/ `grpc`（公布 gRPC 端口）。与注册中心类型解耦——本项目中 S2 注册到 Nacos 但由 S1 经 gRPC 访问（设为 `grpc`），S3 注册到 etcd 但由 S2 经 WS 访问（设为 `ws`） |
 | `JANUS_NACOS_ENDPOINT` | localhost:8848 | Nacos 地址 |
 | `JANUS_ETCD_ENDPOINT` | http://localhost:2379 | etcd 地址 |
 | `JANUS_OTEL_ENABLED` | Y | 是否启用 OpenTelemetry |

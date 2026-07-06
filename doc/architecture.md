@@ -7,15 +7,15 @@ Janus Server 是一个统一通信服务器，同时支持 **WebSocket JSON**、
 ### 请求链路
 
 ```
-Postman ──[WS JSON/Binary]──▶ janus-server-i ──[Nacos 发现]──▶ janus-server-ii ──[etcd 发现]──▶ janus-server-iii
-      (入口)                    (WS 转发)              (中间节点)              (gRPC 转发)            (终端处理)
+Postman ──[WS JSON]──▶ janus-server-i ──[Nacos 发现]──▶ janus-server-ii ──[etcd 发现]──▶ janus-server-iii
+      (入口)                    (gRPC 转发)            (中间节点)              (WS Binary 转发)            (终端处理)
 ```
 
 | 节点 | 接收协议 | 转发协议 | 服务发现 | 服务注册 |
 |------|---------|---------|---------|---------|
-| janus-server-i | WebSocket (Postman 直连) | WebSocket | Nacos | 无 |
-| janus-server-ii | WebSocket (S1 → S2) | gRPC | etcd | Nacos |
-| janus-server-iii | gRPC (S2 → S3) | 无 (本地处理) | 无 | etcd |
+| janus-server-i | WebSocket JSON (Postman 直连, 仅 json) | gRPC | Nacos | 无 |
+| janus-server-ii | gRPC (S1 → S2) | WebSocket Binary | etcd | Nacos |
+| janus-server-iii | WebSocket Binary (S2 → S3, 仅 binary) | 无 (本地处理) | 无 | etcd |
 
 ---
 
@@ -28,9 +28,9 @@ graph TB
     end
 
     subgraph Janus 服务链
-        S1[janus-server-i<br/>WS Server + WS Client]
-        S2[janus-server-ii<br/>WS Server + gRPC Client]
-        S3[janus-server-iii<br/>gRPC Server]
+        S1[janus-server-i<br/>WS(JSON) Server + gRPC Client]
+        S2[janus-server-ii<br/>gRPC Server + WS(Binary) Client]
+        S3[janus-server-iii<br/>WS(Binary) Server]
     end
 
     subgraph 服务发现
@@ -49,10 +49,10 @@ graph TB
     PM -->|WS JSON/Binary| S1
     S1 -->|Nacos 发现 S2| NC
     NC -->|返回 S2 地址| S1
-    S1 -->|WS 转发| S2
+    S1 -->|gRPC 转发| S2
     S2 -->|etcd 发现 S3| ET
     ET -->|返回 S3 地址| S2
-    S2 -->|gRPC 转发| S3
+    S2 -->|WS Binary 转发| S3
     S3 -->|本地处理| S3
 
     S1 -->|OTLP Traces| JG
@@ -185,7 +185,7 @@ janus-server-java/
 | `TalkMoreAnswerOne` | Client Streaming | 客户端流式，多请求一响应 |
 | `TalkBidirectional` | Bidirectional Streaming | 双向流式 |
 
-> 上述四种模型的完整流式语义仅在**原生 gRPC 入口路径**（gRPC → gRPC）上保留。经 **WS 入口**桥接到 gRPC 时，客户端流（`TalkMoreAnswerOne`）与双向流（`TalkBidirectional`）会收敛为一元 `Talk` 调用，服务端流（`TalkOneAnswerMore`）则聚合为单个响应帧返回——详见 [协议规范 §6.3](protocol.md#63-转换规则)。
+> 上述四种模型的完整流式语义仅在**原生 gRPC 入口路径**（gRPC → gRPC）上保留。当 **gRPC 入口**桥接到 **WS 下游转发**时（S2：gRPC 收 → WS 发），客户端流（`TalkMoreAnswerOne`）与双向流（`TalkBidirectional`）会收敛为一元 WS 往返，服务端流（`TalkOneAnswerMore`）则聚合为单个响应帧返回——详见 [协议规范 §6.3](protocol.md#63-转换规则)。
 
 ### 5.4 ChainHandler (链路编排)
 
@@ -202,7 +202,7 @@ janus-server-java/
 
 > **故障语义**：被配置为转发角色（S1 / S2）的节点，若下游不可用**不会**静默回退到本地处理（那会掩盖下游故障并返回伪造结果），而是返回 `status=503` 的 `ERROR` 信封，使故障沿链路上抛。本地处理仅保留给未配置下游的终端节点（S3）。
 >
-> 经 WS 入口桥接到 gRPC 时，客户端流 / 双向流会**收敛为一元调用**，完整流式语义详见 [协议规范 §6.3](protocol.md#63-转换规则)。
+> 当 gRPC 入口桥接到 WS 下游转发时（S2），客户端流 / 双向流会**收敛为一元往返**，完整流式语义详见 [协议规范 §6.3](protocol.md#63-转换规则)。
 
 每次处理创建 OpenTelemetry Span，实现全链路追踪。
 
@@ -219,7 +219,7 @@ janus-server-java/
 
 [EtcdRegistry.java](../src/main/java/org/janus/discovery/EtcdRegistry.java) 实现：
 - 使用 etcd Lease + KeepAlive 实现健康检查
-- Key 格式：`janus-server/grpc://host:port`
+- Key 格式：`janus-server/<scheme>://host:port`（scheme 反映公布协议，如 `ws://` 或 `grpc://`；协议同时存于 value）
 - TTL = 10 秒，到期自动剔除
 
 #### gRPC Name Resolver
@@ -244,7 +244,7 @@ janus-server-java/
 ### 6.2 追踪链路传播
 
 ```
-Postman → S1 (WS Server Span) → S1 (WS Client Span) → S2 (WS Server Span) → S2 (gRPC Client Span) → S3 (gRPC Server Span)
+Postman → S1 (WS Server Span) → S1 (gRPC Client Span) → S2 (gRPC Server Span) → S2 (WS Client Span) → S3 (WS Server Span)
 ```
 
 每个节点：
@@ -291,15 +291,15 @@ Grafana 自动配置三个数据源：
 │       │              │              │                             │
 │  ┌────┴──────────────┴──────────────┴─────┐                      │
 │  │      janus-server-i (:8080)         │                      │
-│  │      WS receive → WS forward (Nacos)   │                      │
+│  │      WS JSON receive → gRPC forward    │                      │
 │  └────────────────────────────────────────┘                      │
 │  ┌────────────────────────────────────────┐                      │
-│  │      janus-server-ii (:8080)         │                      │
-│  │      WS receive → gRPC forward (etcd)  │                      │
+│  │      janus-server-ii (:9090)         │                      │
+│  │      gRPC receive → WS Binary forward  │                      │
 │  └────────────────────────────────────────┘                      │
 │  ┌────────────────────────────────────────┐                      │
-│  │      janus-server-iii (:9090)         │                      │
-│  │      gRPC receive → local process      │                      │
+│  │      janus-server-iii (:8080)         │                      │
+│  │      WS Binary receive → local process │                      │
 │  └────────────────────────────────────────┘                      │
 │                                                                  │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐         │
@@ -321,7 +321,10 @@ Grafana 自动配置三个数据源：
 |---------|------|------|
 | `JANUS_DOWNSTREAM_PROTOCOL` | `ws` / `grpc` / `none` | 向下游转发使用的协议（`none` = 终端节点，本地处理） |
 | `JANUS_DOWNSTREAM_DISCOVERY` | `nacos` / `etcd` / `none` | 用哪个注册中心**发现**下游 |
+| `JANUS_DOWNSTREAM_WS_MODE` | `json` / `binary` | WS 转发的线路编码（仅 `DOWNSTREAM_PROTOCOL=ws` 时）；本链路 S2=`binary` |
+| `JANUS_WS_MODE` | `json` / `binary` / `both` | 本节点 WS 服务端只提供哪种协议；本链路 S1=`json`、S3=`binary` |
 | `JANUS_REGISTER` | `nacos` / `etcd` / `none` | 把自己**注册**到哪个注册中心 |
+| `JANUS_REGISTER_PROTOCOL` | `ws` / `grpc` | 向注册中心**公布的协议 / 端口**（即上游以何协议访问本节点），与注册中心类型解耦 |
 
 > 三节点的角色配置对照见 [使用指南 §5.3](guide.md#53-本地多节点链路运行) 与 [Cookbook §1.1](cookbook.md#11-角色由环境变量塑造)。
 

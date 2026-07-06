@@ -293,12 +293,17 @@ public final class BinaryCodec {
 
     /**
      * Encode a unified Janus envelope into a MSG_JANUS binary frame.
+     *
+     * <p>{@code requestId} is a per-hop correlation id: it lets a multiplexed
+     * binary WS forwarding connection carry many concurrent in-flight requests
+     * and match each reply back to its caller (the downstream echoes the same id).
+     * Empty string when unused (e.g. a Postman-originated frame with no id).
      */
     public static byte[] encodeJanus(
             int method, int mode, int seq, boolean streamEnd,
             int status, String data, String meta,
             String traceId, String spanId, String errorMsg,
-            EchoResult[] results) {
+            String requestId, EchoResult[] results) {
         ByteWriter w = new ByteWriter();
         w.writeU8(method);
         w.writeU8(mode);
@@ -310,6 +315,7 @@ public final class BinaryCodec {
         w.writeString(traceId != null ? traceId : "");
         w.writeString(spanId != null ? spanId : "");
         w.writeString(errorMsg != null ? errorMsg : "");
+        w.writeString(requestId != null ? requestId : "");
         if (results != null) {
             w.writeU32(results.length);
             for (EchoResult r : results) {
@@ -330,7 +336,7 @@ public final class BinaryCodec {
             int method, int mode, int seq, boolean streamEnd,
             int status, String data, String meta,
             String traceId, String spanId, String errorMsg,
-            EchoResult[] results) {}
+            String requestId, EchoResult[] results) {}
 
     /**
      * Decode a MSG_JANUS binary frame into a JanusFrame.
@@ -351,6 +357,7 @@ public final class BinaryCodec {
         String traceId = r.readString();
         String spanId = r.readString();
         String errorMsg = r.readString();
+        String requestId = r.readString();
         int count = r.readCount();
         EchoResult[] results = new EchoResult[count];
         for (int i = 0; i < count; i++) {
@@ -360,6 +367,6 @@ public final class BinaryCodec {
             results[i] = new EchoResult(idx, type, kv);
         }
         return new JanusFrame(method, mode, seq, streamEnd, status,
-                dataStr, meta, traceId, spanId, errorMsg, results);
+                dataStr, meta, traceId, spanId, errorMsg, requestId, results);
     }
 }

@@ -20,7 +20,7 @@ import java.util.concurrent.TimeUnit;
  * Janus Server — a unified server supporting WebSocket (JSON + Binary) and gRPC (4 models).
  *
  * Request chain:
- *   Postman → Server 1 (WS) → [Nacos] → Server 2 (WS) → [etcd] → Server 3 (gRPC)
+ *   Postman → Server 1 (WS→gRPC) → [Nacos] → Server 2 (gRPC→WS) → [etcd] → Server 3 (WS→local)
  *
  * Each instance starts both WS and gRPC servers. The role (entry/middle/terminal)
  * is configured via environment variables:
@@ -28,6 +28,7 @@ import java.util.concurrent.TimeUnit;
  *   JANUS_DOWNSTREAM_PROTOCOL  - ws, grpc, none
  *   JANUS_DOWNSTREAM_DISCOVERY - nacos, etcd, none
  *   JANUS_REGISTER             - nacos, etcd, none
+ *   JANUS_REGISTER_PROTOCOL    - ws, grpc (how upstreams reach this node)
  *
  * Observability:
  *   JANUS_OTEL_ENABLED         - Y/N (default Y)
@@ -94,6 +95,11 @@ public class JanusServer {
             chainHandler.setWsClient(wsClient);
         }
 
+        // 6b. Let the gRPC entry path route through the chain handler, so a node
+        //     that receives on gRPC can forward downstream over WebSocket
+        //     (gRPC-in → WS-out middle node) or process locally at a terminal node.
+        grpcService.setChainHandler(chainHandler);
+
         // 7. Start servers — must be listening BEFORE registering into discovery
         grpcServer.start();
         wsServer = new JanusWsServer(ServerConfig.WS_PORT, chainHandler);
@@ -138,15 +144,14 @@ public class JanusServer {
             return;
         }
 
-        String protocol = ServerConfig.hasDownstream() ? "ws" : "grpc";
-        int port = ServerConfig.registerEtcd() ? ServerConfig.GRPC_PORT : ServerConfig.WS_PORT;
-
-        // For etcd, register with grpc:// scheme since the etcd name resolver expects it
-        if (ServerConfig.registerEtcd()) {
-            registry.register(ServerConfig.SVC_DISC_NAME, ServerConfig.ADVERTISED_HOST, ServerConfig.GRPC_PORT, "grpc");
-        } else {
-            registry.register(ServerConfig.SVC_DISC_NAME, ServerConfig.ADVERTISED_HOST, ServerConfig.WS_PORT, "ws");
-        }
+        // The advertised protocol/port reflects how this node's UPSTREAM reaches
+        // it, and is independent of which registry (nacos/etcd) is used:
+        //   S2 registers in Nacos but is reached via gRPC → advertise GRPC_PORT.
+        //   S3 registers in etcd  but is reached via WS   → advertise WS_PORT.
+        // Controlled by JANUS_REGISTER_PROTOCOL (see ServerConfig).
+        String protocol = ServerConfig.REGISTER_PROTOCOL;
+        int port = ServerConfig.registerAsGrpc() ? ServerConfig.GRPC_PORT : ServerConfig.WS_PORT;
+        registry.register(ServerConfig.SVC_DISC_NAME, ServerConfig.ADVERTISED_HOST, port, protocol);
     }
 
     public void stop() {

@@ -21,9 +21,8 @@ Janus 协议的核心设计原则：**同一逻辑消息，三种线路编码，
 任意传输层接收的消息，可经任意其他传输层转发：
 
 ```
-Postman (WS JSON) → S1 ──[WS JSON]──▶ S2 ──[gRPC]──▶ S3
-Postman (WS Binary) → S1 ──[WS JSON]──▶ S2 ──[gRPC]──▶ S3
-gRPC Client → S2 ──[gRPC]──▶ S3
+Postman (WS JSON) → S1 ──[gRPC]──▶ S2 ──[WS Binary]──▶ S3
+gRPC Client → S2 ──[WS Binary]──▶ S3
 ```
 
 ---
@@ -56,6 +55,9 @@ JanusEnvelope {
   ── 流控制 ──
   seq:         int32        // 序列号（0-based，流式 RPC 用于消息排序）
   stream_end:  bool         // true = 发送方完成（半关闭）
+
+  ── 多路复用关联 ──
+  request_id:  string       // 每跳关联 id：一条转发连接多路复用大量在途请求时，下游原样回写以匹配回复（WS JSON 字段 / WS Binary 帧字段 / gRPC 无需，走独立流）
 }
 ```
 
@@ -230,9 +232,12 @@ WebSocket **文本帧**，UTF-8 编码的 JSON 对象。
         string      trace_id      Trace ID
         string      span_id       Span ID
         string      error_msg     错误描述（ERROR 模式）
+        string      request_id    每跳关联 id（多路复用二进制转发用；空串表示未用）
         u32         results_count 结果数量（RESPONSE 模式）
         [Result]    results       结果数组（RESPONSE 模式）
 ```
+
+> `request_id` 是在 `error_msg` 之后、`results_count` 之前新增的 string 字段。它让一条二进制 WS 转发连接能同时承载大量在途请求：下游把收到的 `request_id` 原样回写到响应帧，转发端据此把回复匹配回对应的在途请求（与 WS JSON 的 `request_id` 字段作用一致）。
 
 **Result 编码：**
 
@@ -257,6 +262,9 @@ TALK 请求，data="0", meta="postman"：
        00 00 00 07 70 6F 73 74 6D 61 6E  meta = "postman"
        00 00 00 00     trace_id = "" (空)
        00 00 00 00     span_id = "" (空)
+       00 00 00 00     error_msg = "" (空)
+       00 00 00 00     request_id = "" (空，Postman 未设置关联 id)
+       00 00 00 00     results_count = 0 (REQUEST 模式)
 ```
 
 ### 4.5 基本类型编码
@@ -399,18 +407,20 @@ gRPC 请求通过 Metadata 传播链路追踪上下文：
 4. gRPC 响应 → JanusEnvelope (mode=RESPONSE)
 ```
 
-> **⚠️ 限制：WS 入口的客户端流 / 双向流会被收敛为一元调用。**
-> WS→gRPC 桥接在 `ChainHandler` 每次只处理**一个**逻辑消息（WS 文本/二进制帧无法承载真正的多消息流），因此无法回放一个真正的客户端流。对于 `TALK_MORE_ANSWER_ONE`（客户端流）与 `TALK_BIDIRECTIONAL`（双向流），桥接层退化为单次 `talk()` 一元调用（一进一出）。
-> 服务端流 `TALK_ONE_ANSWER_MORE` 会正常遍历下游流式响应并聚合为一个 JSON 响应帧返回。
-> **真正的四种流式语义仅在原生 gRPC 入口路径（gRPC → gRPC）上完整保留**，此时 `JanusServiceImpl` 使用 `asyncStub` 逐条转发请求/响应并在 `stream_end=true` 时半关闭。
+> **⚠️ 限制：桥接到异构传输时，客户端流 / 双向流会被收敛为一元调用。**
+> 转发桥接（`ChainHandler`）每次只处理**一个**逻辑消息——无论是 WS 帧还是单次 gRPC 调用——因此无法回放一个真正的多消息流。对于 `TALK_MORE_ANSWER_ONE`（客户端流）与 `TALK_BIDIRECTIONAL`（双向流），桥接层退化为单次一元往返（一进一出）：
+> - S1（WS 入口 → gRPC 转发）：退化为下游 `talk()` 一元调用；
+> - S2（gRPC 入口 → WS 转发）：退化为单次 WS 往返（本链路为 WS Binary）。
+> 服务端流 `TALK_ONE_ANSWER_MORE` 会遍历/聚合为**单个响应帧**返回。
+> **真正的四种流式语义仅在同协议直连（如原生 gRPC → gRPC）路径上完整保留**，此时 `JanusServiceImpl` 使用 `asyncStub` 逐条转发请求/响应并在 `stream_end=true` 时半关闭。
 
-#### gRPC → WS JSON
+#### gRPC → WS（S2：gRPC 入口 → WS 下游转发，本链路编码为 Binary）
 
 ```
-1. 从 gRPC Metadata 提取 x-trace-id / x-span-id
-2. TalkRequest → JanusEnvelope (mode=REQUEST, method 由 gRPC 方法名确定)
-3. TalkResponse → JanusEnvelope (mode=RESPONSE)
-4. 序列化为 JSON 文本帧
+1. 从 gRPC Metadata / TalkRequest 的 trace_id/span_id 提取追踪上下文
+2. TalkRequest → JanusEnvelope (mode=REQUEST, method 由 gRPC 方法名确定)，生成 request_id
+3. 按 `JANUS_DOWNSTREAM_WS_MODE` 编码（本链路 binary：`envelopeToBinary` → MSG_JANUS 帧，request_id 写入帧）经多路复用连接转发到下游，得到 RESPONSE 帧（客户端流 / 双向流在此收敛为一元往返）
+4. 解码回 JanusEnvelope → TalkResponse 回传给 gRPC 调用方
 ```
 
 #### WS JSON → WS Binary
@@ -433,40 +443,30 @@ gRPC 请求通过 Metadata 传播链路追踪上下文：
 
 ### 6.4 转换场景示例
 
-**场景：Postman (WS JSON) → S1 (WS) → S2 (gRPC) → S3 (gRPC)**
+**场景：Postman (WS JSON) → S1 (WS JSON→gRPC) → S2 (gRPC→WS Binary) → S3 (WS Binary→本地)**
 
 ```
 Postman → S1:
   WS JSON: {"method":"TALK","mode":"REQUEST","data":"0","meta":"postman",...}
 
-S1 → S2 (WS JSON 转发，协议不变):
-  WS JSON: {"method":"TALK","mode":"REQUEST","data":"0","meta":"postman",...}
-
-S2 → S3 (WS JSON → gRPC 转换):
+S1 → S2 (WS JSON → gRPC 转换):
   gRPC Talk(TalkRequest{data:"0", meta:"postman", trace_id:"xxx", span_id:"yyy"})
 
-S3 → S2 (gRPC 响应):
+S2 → S3 (gRPC → WS Binary 转换):
+  WS Binary: MSG_JANUS(method=TALK, mode=REQUEST, data="0", meta="postman",
+                       trace_id, span_id, request_id=<S2 生成的关联 id>)
+
+S3 → S2 (WS Binary 响应，回写同一 request_id):
+  WS Binary: MSG_JANUS(mode=RESPONSE, status=200, results=[...], request_id=<同上>)
+
+S2 → S1 (WS Binary → gRPC 转换):
   gRPC TalkResponse{status:200, results:[...]}
 
-S2 → S1 (gRPC → WS JSON 转换):
-  WS JSON: {"method":"TALK","mode":"RESPONSE","status":200,"results":[...],...}
-
-S1 → Postman:
+S1 → Postman (gRPC → WS JSON 转换):
   WS JSON: {"method":"TALK","mode":"RESPONSE","status":200,"results":[...],...}
 ```
 
-**场景：Client (WS Binary) → S1 (WS) → S2 (gRPC) → S3**
-
-```
-Client → S1:
-  WS Binary: MSG_JANUS(method=TALK, mode=REQUEST, data="0", meta="binary-client")
-
-S1 → S2 (WS Binary → WS JSON 转换):
-  WS JSON: {"method":"TALK","mode":"REQUEST","data":"0","meta":"binary-client",...}
-
-S2 → S3 (WS JSON → gRPC 转换):
-  gRPC Talk(TalkRequest{data:"0", meta:"binary-client"})
-```
+> S1 只提供 WS JSON（`JANUS_WS_MODE=json`），S3 只提供 WS Binary（`JANUS_WS_MODE=binary`）；S2 的下游转发编码由 `JANUS_DOWNSTREAM_WS_MODE=binary` 指定。二进制帧的 `request_id` 字段是二进制多路复用转发能正确关联回复的关键。
 
 ---
 

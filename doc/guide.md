@@ -159,7 +159,7 @@ wscat -c ws://localhost:8080/json
 }
 ```
 
-请求会经过完整链路：S1 (WS) → S2 (WS) → S3 (gRPC) → 本地处理 → 响应原路返回。
+请求会经过完整链路：S1 (WS JSON 接收 → gRPC 转发) → S2 (gRPC 接收 → WS Binary 转发) → S3 (WS Binary 接收 → 本地处理) → 响应原路返回。
 
 ### 3.2 WebSocket Binary 模式
 
@@ -396,7 +396,9 @@ docker run -d --name jaeger -p 16686:16686 -p 4317:4317 \
 ```bash
 java -jar target/janus.jar \
   -DJANUS_SERVER_ID=server-iii \
+  -DJANUS_WS_MODE=binary \
   -DJANUS_REGISTER=etcd \
+  -DJANUS_REGISTER_PROTOCOL=ws \
   -DJANUS_ETCD_ENDPOINT=http://localhost:2379 \
   -DJANUS_ADVERTISED_HOST=localhost \
   -DJANUS_OTEL_ENABLED=Y \
@@ -408,9 +410,11 @@ java -jar target/janus.jar \
 ```bash
 java -jar target/janus.jar \
   -DJANUS_SERVER_ID=server-ii \
-  -DJANUS_DOWNSTREAM_PROTOCOL=grpc \
+  -DJANUS_DOWNSTREAM_PROTOCOL=ws \
+  -DJANUS_DOWNSTREAM_WS_MODE=binary \
   -DJANUS_DOWNSTREAM_DISCOVERY=etcd \
   -DJANUS_REGISTER=nacos \
+  -DJANUS_REGISTER_PROTOCOL=grpc \
   -DJANUS_NACOS_ENDPOINT=localhost:8848 \
   -DJANUS_ETCD_ENDPOINT=http://localhost:2379 \
   -DJANUS_ADVERTISED_HOST=localhost \
@@ -423,7 +427,8 @@ java -jar target/janus.jar \
 ```bash
 java -jar target/janus.jar \
   -DJANUS_SERVER_ID=server-i \
-  -DJANUS_DOWNSTREAM_PROTOCOL=ws \
+  -DJANUS_WS_MODE=json \
+  -DJANUS_DOWNSTREAM_PROTOCOL=grpc \
   -DJANUS_DOWNSTREAM_DISCOVERY=nacos \
   -DJANUS_NACOS_ENDPOINT=localhost:8848 \
   -DJANUS_ADVERTISED_HOST=localhost \
