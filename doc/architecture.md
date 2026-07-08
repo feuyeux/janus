@@ -185,6 +185,7 @@ janus-server-java/
 │   │   ├── ServiceRegistry.java     # 注册发现接口
 │   │   ├── NacosRegistry.java       # Nacos 实现
 │   │   ├── EtcdRegistry.java        # etcd 实现
+│   │   ├── StaticRegistry.java      # 静态下游（固定 host:port，支持多实例列表）
 │   │   ├── EtcdNameResolver.java    # gRPC etcd 名称解析器
 │   │   ├── EtcdNameResolverProvider.java
 │   │   ├── NacosNameResolver.java   # gRPC Nacos 名称解析器
@@ -192,6 +193,8 @@ janus-server-java/
 │   ├── observability/
 │   │   ├── OtelSupport.java         # OpenTelemetry 初始化
 │   │   └── TracingHelper.java       # Span 创建与上下文传播
+│   ├── security/
+│   │   └── TlsSupport.java          # 可选 TLS（gRPC / wss）证书装配
 │   └── handler/
 │       └── ChainHandler.java        # 请求链路编排
 ├── src/main/proto/
@@ -201,9 +204,11 @@ janus-server-java/
 └── docker/
     ├── Dockerfile
     ├── docker-compose.yml
+    ├── docker-compose.exp.yml        # nginx 负载均衡实验栈（2 front / 3 backend）
     ├── prometheus.yml
     ├── loki-config.yml
     ├── promtail-config.yml
+    ├── nginx/                        # 负载均衡实验：nginx.conf / validate.sh / prometheus.exp.yml
     └── grafana/provisioning/
         └── datasources/datasources.yml
 ```
@@ -216,7 +221,7 @@ janus-server-java/
 
 [JanusServer.java](../src/main/java/org/janus/JanusServer.java) 是整个服务的主入口，负责：
 
-1. 初始化 OpenTelemetry SDK
+1. 初始化 tracing 与 metrics 可观测组件
 2. 创建服务注册中心连接（Nacos / etcd）
 3. 注册自身到注册中心
 4. 启动 gRPC 服务端

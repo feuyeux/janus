@@ -76,7 +76,7 @@ Postman ──WS(JSON)──▶ S1 ──gRPC──▶ S2 ──WS(Binary)──
 [`JanusServer.start()`](../src/main/java/org/janus/JanusServer.java) 是理解"一个节点由什么组成"的最佳入口。它严格按下面顺序装配，顺序本身就体现了依赖关系：
 
 ```
-1. initOtel()            初始化 OpenTelemetry（Tracer + Prometheus 端口），得到 TracingHelper
+1. initOtel()            按 JANUS_OTEL_ENABLED / JANUS_METRICS_ENABLED 初始化 tracing 与 metrics，得到 TracingHelper
 2. createRegistries()    按 REGISTER / DISCOVERY 建立注册中心连接（可能是两个不同实例）
 3. new JanusServiceImpl / JanusGrpcServer   创建 gRPC 服务实现与服务端（尚未 start）
 4. if grpc 下游: JanusGrpcClient.connect()  连下游 gRPC，并把 stub 注入 grpcService

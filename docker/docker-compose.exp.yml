@@ -1,0 +1,242 @@
+# ════════════════════════════════════════════════════════════════════════════
+# EXPERIMENT — Janus load balancing / limiting through nginx  (ONE experiment)
+#
+#   client ─(ws json)─▶ nginx :8080 (EDGE RR) ─▶ A1, A2 (front)
+#                       A1, A2 ─(ws binary)─▶ nginx :8081 (B-HOP) ─▶ B1, B2, B3
+#
+# A = 2 janus-front instances; B = 3 janus-backend replicas. One nginx serves
+# both hops: the EDGE round-robins client WS-JSON across the fronts; the B-HOP
+# load-balances / limits the WS-binary connections the fronts forward to the
+# backends. Fronts use a STATIC downstream (no discovery) pointing at the B-HOP.
+#
+# Experiment items (see doc/load-balance.md):
+#   LB-1   B-HOP least_conn          → backends ~equal
+#   CONN-1 B-HOP limit_conn=100      → excess concurrent conn 503 (per-IP, fair)
+#   RATE-1 B-HOP limit_req 50r/s     → excess new-conn rate 503 (per-IP, fair)
+#   CONN-2 B-HOP max_conns (SHARED)  → later front (a2) starved  [enable in nginx.conf]
+#   SCALE-1 backend scale up/down    → sticky multiplexed conns; churn to rebalance [--profile scale]
+#   RESTART-1 backend single restart → failure window + front auto-reconnect recovery
+#
+# Run:
+#   docker compose -f docker/docker-compose.exp.yml --project-directory . up --build
+#   # optional observability (Prometheus + Grafana):
+#   docker compose -f docker/docker-compose.exp.yml --project-directory . --profile obs up --build
+#   # then wait ~30s so a2's delayed boot completes, and validate:
+#   bash docker/nginx/validate.sh all        # LB-1 / CONN-1 / RATE-1
+#   bash docker/nginx/validate.sh starve     # CONN-2 (only after enabling max_conns)
+#
+# Host ports:
+#   ws://localhost:18080/json      client → EDGE nginx → fronts
+#   ws://localhost:18081/binary    B-HOP via nginx (direct probe for CONN-1/RATE-1)
+#   http://localhost:18090/status  nginx stub_status
+#   http://localhost:19101 / 19102 front A1 / A2 metrics
+#   http://localhost:19201..03     backend B1/B2/B3 metrics (LB-1 fairness)
+#   http://localhost:19204         backend B4 metrics (SCALE-1, --profile scale)
+# ════════════════════════════════════════════════════════════════════════════
+
+x-janus-backend: &janus-backend-base
+  build:
+    context: .
+    dockerfile: docker/Dockerfile
+  environment: &janus-backend-env
+    JANUS_WS_PORT: "8080"
+    JANUS_GRPC_PORT: "9090"
+    JANUS_METRICS_PORT: "9100"
+    # Terminal WS(binary) backend: no downstream, no discovery, no registration.
+    # nginx reaches it directly by container name (static upstream).
+    JANUS_DOWNSTREAM_PROTOCOL: "none"
+    JANUS_DOWNSTREAM_DISCOVERY: "none"
+    JANUS_REGISTER: "none"
+    JANUS_WS_MODE: "binary"     # only accept /binary (the front→nginx→backend wire)
+    JANUS_OTEL_ENABLED: "N"
+    JANUS_METRICS_ENABLED: "Y"
+  restart: unless-stopped
+  networks: [janus-exp]
+
+x-janus-front: &janus-front-base
+  build:
+    context: .
+    dockerfile: docker/Dockerfile
+  environment: &janus-front-env
+    JANUS_WS_PORT: "8080"
+    JANUS_GRPC_PORT: "9090"
+    JANUS_METRICS_PORT: "9100"
+    JANUS_WS_MODE: "json"                 # client speaks WS JSON to the front
+    # Forward downstream as WS Binary to a STATIC target (nginx B-HOP), which
+    # load-balances / limits across the backends. No service discovery involved
+    # (A and B may live in different clusters, so front bridges through nginx).
+    JANUS_DOWNSTREAM_PROTOCOL: "ws"
+    JANUS_DOWNSTREAM_WS_MODE: "binary"
+    JANUS_DOWNSTREAM_DISCOVERY: "static"
+    JANUS_DOWNSTREAM_HOST: "nginx"
+    JANUS_DOWNSTREAM_PORT: "8081"         # nginx B-HOP server
+    # Pool = 6: a multiple of the 3 backends (2 conns/backend/front) so least_conn
+    # spreads evenly for LB-1; it also equals B's total capacity when CONN-2's
+    # max_conns=2×3=6 is enabled, so one front alone can fill B → starvation.
+    JANUS_WS_POOL_SIZE: "6"
+    JANUS_OTEL_ENABLED: "N"
+    JANUS_METRICS_ENABLED: "Y"
+  restart: unless-stopped
+  networks: [janus-exp]
+
+services:
+
+  # ── B tier · 3 WS(binary) terminal backends ──────────────────────────────
+  janus-backend-1:
+    <<: *janus-backend-base
+    container_name: janus-backend-1
+    environment:
+      <<: *janus-backend-env
+      JANUS_SERVER_ID: "backend-1"
+      JANUS_ADVERTISED_HOST: "janus-backend-1"
+    ports: ["19201:9100"]
+
+  janus-backend-2:
+    <<: *janus-backend-base
+    container_name: janus-backend-2
+    environment:
+      <<: *janus-backend-env
+      JANUS_SERVER_ID: "backend-2"
+      JANUS_ADVERTISED_HOST: "janus-backend-2"
+    ports: ["19202:9100"]
+
+  janus-backend-3:
+    <<: *janus-backend-base
+    container_name: janus-backend-3
+    environment:
+      <<: *janus-backend-env
+      JANUS_SERVER_ID: "backend-3"
+      JANUS_ADVERTISED_HOST: "janus-backend-3"
+    ports: ["19203:9100"]
+
+  # ── SCALE-1 · extra backend replica (opt-in: --profile scale) ──────────────
+  # Scale-up target. Start it with `--profile scale`, uncomment the matching
+  # `server janus-backend-4:8080` line in nginx.conf, then `nginx -s reload`.
+  # least_conn only balances at connect time, so the fronts' long-lived
+  # multiplexed connections keep feeding b1..b3 and b4 stays ~idle until the
+  # connections churn (e.g. restart the fronts). See doc/load-balance.md SCALE-1.
+  janus-backend-4:
+    <<: *janus-backend-base
+    container_name: janus-backend-4
+    profiles: ["scale"]
+    environment:
+      <<: *janus-backend-env
+      JANUS_SERVER_ID: "backend-4"
+      JANUS_ADVERTISED_HOST: "janus-backend-4"
+    ports: ["19204:9100"]
+
+  # ── nginx · EDGE (:8080) + B-HOP (:8081) ──────────────────────────────────
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: exp-nginx
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "18080:8080"   # client → EDGE
+      - "18081:8081"   # B-HOP (direct probe for CONN-1 / RATE-1)
+      - "18090:8090"   # nginx status / health
+    depends_on: [janus-backend-1, janus-backend-2, janus-backend-3]
+    restart: unless-stopped
+    networks: [janus-exp]
+
+  # ── A tier · front A1 (boots immediately) ─────────────────────────────────
+  janus-front-a1:
+    <<: *janus-front-base
+    container_name: janus-front-a1
+    environment:
+      <<: *janus-front-env
+      JANUS_SERVER_ID: "front-a1"
+      JANUS_ADVERTISED_HOST: "janus-front-a1"
+    ports: ["19101:9100"]
+    depends_on: [nginx]
+
+  # ── A tier · front A2 (delayed 25s) ───────────────────────────────────────
+  # The delay is harmless for LB-1/CONN-1/RATE-1 (just wait ~30s before testing)
+  # and makes CONN-2 deterministic: a1 fills B's capped slots before a2 arrives,
+  # so a2 is the one that starves. (In the wild the "winner" is just whoever
+  # connects first — that arbitrariness is exactly the CONN-2 hazard.)
+  janus-front-a2:
+    <<: *janus-front-base
+    container_name: janus-front-a2
+    entrypoint: ["sh", "-c", "sleep 25 && exec java -jar janus.jar"]
+    environment:
+      <<: *janus-front-env
+      JANUS_SERVER_ID: "front-a2"
+      JANUS_ADVERTISED_HOST: "janus-front-a2"
+    ports: ["19102:9100"]
+    depends_on: [nginx, janus-front-a1]
+
+  # ── LB-2 · multi-instance nginx balance (opt-in: --profile lb2) ────────────
+  # Question: with SEVERAL nginx between A and B, does the aggregate A→B
+  # connection distribution stay balanced? Each nginx runs its OWN least_conn
+  # with no shared state, so their tie-breaks are correlated and leftover
+  # connections pile onto the same backend. A dedicated front fans its pool of
+  # 12 connections across 3 nginx (4 each). 4 is not a multiple of 3 backends, so
+  # each nginx lands 2/1/1 → aggregate 6/3/3 → SKEW. (Set pool=9 → 3/nginx → 1/1/1
+  # → 3/3/3 balanced; see doc/load-balance.md LB-2 tuning.)
+  nginx-lb2-1:
+    image: nginx:1.27-alpine
+    container_name: exp-nginx-lb2-1
+    profiles: ["lb2"]
+    volumes: [ "./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro" ]
+    depends_on: [janus-backend-1, janus-backend-2, janus-backend-3]
+    networks: [janus-exp]
+
+  nginx-lb2-2:
+    image: nginx:1.27-alpine
+    container_name: exp-nginx-lb2-2
+    profiles: ["lb2"]
+    volumes: [ "./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro" ]
+    depends_on: [janus-backend-1, janus-backend-2, janus-backend-3]
+    networks: [janus-exp]
+
+  nginx-lb2-3:
+    image: nginx:1.27-alpine
+    container_name: exp-nginx-lb2-3
+    profiles: ["lb2"]
+    volumes: [ "./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro" ]
+    depends_on: [janus-backend-1, janus-backend-2, janus-backend-3]
+    networks: [janus-exp]
+
+  janus-front-lb2:
+    <<: *janus-front-base
+    container_name: janus-front-lb2
+    profiles: ["lb2"]
+    environment:
+      <<: *janus-front-env
+      JANUS_SERVER_ID: "front-lb2"
+      JANUS_ADVERTISED_HOST: "janus-front-lb2"
+      # Fan the forwarding pool across the THREE nginx instances (not one).
+      JANUS_DOWNSTREAM_HOSTS: "nginx-lb2-1:8081,nginx-lb2-2:8081,nginx-lb2-3:8081"
+      # 12 across 3 nginx = 4 each; 4 is NOT a multiple of 3 backends → skew.
+      JANUS_WS_POOL_SIZE: "12"
+    ports:
+      - "18082:8080"   # client → LB-2 front (WS JSON entry)
+      - "19103:9100"   # LB-2 front metrics
+    depends_on: [nginx-lb2-1, nginx-lb2-2, nginx-lb2-3]
+
+  # ── Optional observability (opt-in: --profile obs) ─────────────────────────
+  prometheus:
+    image: prom/prometheus:v3.13.0
+    container_name: exp-prometheus
+    profiles: ["obs"]
+    volumes:
+      - ./docker/nginx/prometheus.exp.yml:/etc/prometheus/prometheus.yml:ro
+    ports: ["9090:9090"]
+    depends_on: [janus-front-a1, janus-backend-1]
+    networks: [janus-exp]
+
+  grafana:
+    image: grafana/grafana:12.2.10
+    container_name: exp-grafana
+    profiles: ["obs"]
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    ports: ["3000:3000"]
+    networks: [janus-exp]
+
+networks:
+  janus-exp:
+    driver: bridge

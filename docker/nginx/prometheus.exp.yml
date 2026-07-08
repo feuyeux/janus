@@ -1,0 +1,28 @@
+# Prometheus config for the Janus load-balancing experiment.
+# Scrapes both fronts (A1, A2) and all three backends (B1, B2, B3) so
+# ws_messages_total can be compared:
+#   · across backends → even LB-1 distribution
+#   · across fronts   → CONN-2 starvation (a2 receives client requests but its
+#     downstream is dead, so backends are fed only by a1)
+global:
+  scrape_interval: 5s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'janus-front'
+    static_configs:
+      - targets: ['janus-front-a1:9100']
+        labels: { tier: 'front', node: 'front-a1' }
+      - targets: ['janus-front-a2:9100']
+        labels: { tier: 'front', node: 'front-a2' }
+      # Only up under --profile lb2 (multi-nginx experiment); otherwise shown down.
+      - targets: ['janus-front-lb2:9100']
+        labels: { tier: 'front', node: 'front-lb2' }
+  - job_name: 'janus-backend'
+    static_configs:
+      - targets: ['janus-backend-1:9100']
+        labels: { tier: 'backend', node: 'backend-1' }
+      - targets: ['janus-backend-2:9100']
+        labels: { tier: 'backend', node: 'backend-2' }
+      - targets: ['janus-backend-3:9100']
+        labels: { tier: 'backend', node: 'backend-3' }

@@ -11,7 +11,7 @@
 - **多协议统一**：WebSocket JSON、WebSocket Binary、gRPC 三种传输协议共享同一逻辑消息模型，任意协议接收的请求可透明转发至其他协议
 - **4 种 gRPC 通信模型**：Unary、Server Streaming、Client Streaming、Bidirectional Streaming（完整的流式语义在原生 gRPC 入口路径上保留；当 gRPC 入口桥接到 WS 下游转发时，客户端流 / 双向流会收敛为一元调用，详见 [协议规范](doc/protocol.md#63-转换规则)）
 - **服务注册与发现**：支持 Nacos 和 etcd，gRPC 客户端内置自定义 NameResolver 实现自动负载均衡
-- **全链路可观测**：OpenTelemetry SDK 统一 Tracing（Jaeger）、Metrics（Prometheus）、Logging（Loki + Promtail），Grafana 一站式查询
+- **全链路可观测**：OpenTelemetry tracing（Jaeger）、Prometheus metrics、Logging（Loki + Promtail），Grafana 一站式查询；tracing 与 metrics 可独立开关
 - **单代码多角色**：所有节点运行同一份代码，通过环境变量配置不同角色（入口 / 中间 / 终端节点）
 - **Docker Compose 一键启动**：包含 3 个 Janus 实例 + Nacos + etcd + Jaeger + Prometheus + Loki + Promtail + Grafana 的完整本地环境
 
@@ -203,17 +203,21 @@ docker run -d --name jaeger -p 16686:16686 -p 4317:4317 \
 | `JANUS_DOWNSTREAM_PROTOCOL` | none | 下游协议：`ws` / `grpc` / `none` |
 | `JANUS_DOWNSTREAM_WS_MODE` | json | 下游 WS 转发的线路编码：`json`（文本帧，连 `/json`）/ `binary`（MSG_JANUS 帧，连 `/binary`）。仅当 `JANUS_DOWNSTREAM_PROTOCOL=ws` 时有效。本链路 S2 设为 `binary` |
 | `JANUS_WS_MODE` | both | 本节点 WS 服务端对外提供的协议：`json`（仅 `/json`）/ `binary`（仅 `/binary`）/ `both`。握手时拒绝未提供的路径。本链路 S1=`json`、S3=`binary` |
-| `JANUS_DOWNSTREAM_DISCOVERY` | none | 下游发现：`nacos` / `etcd` / `none` |
+| `JANUS_DOWNSTREAM_DISCOVERY` | none | 下游发现：`nacos` / `etcd` / `static` / `none`。`static` 表示不走注册中心，直接转发到固定地址（见下三行），常用于把下游指向一个自身做负载均衡的反向代理（nginx） |
+| `JANUS_DOWNSTREAM_HOST` | （空） | 仅当 `JANUS_DOWNSTREAM_DISCOVERY=static` 时生效：固定下游主机（如 `nginx`）。若设置了 `JANUS_DOWNSTREAM_HOSTS` 则被其覆盖 |
+| `JANUS_DOWNSTREAM_PORT` | `JANUS_WS_PORT` | 仅当 `JANUS_DOWNSTREAM_DISCOVERY=static` 时生效：固定下游端口，也作为 `JANUS_DOWNSTREAM_HOSTS` 中省略端口时的默认端口 |
+| `JANUS_DOWNSTREAM_HOSTS` | （空） | 仅当 `JANUS_DOWNSTREAM_DISCOVERY=static` 时生效：**多个**固定下游，逗号分隔的 `host[:port]` 列表（端口省略时用 `JANUS_DOWNSTREAM_PORT`）。设置后转发池按轮询铺到所有实例——用于把一个 front 指向**多实例**反向代理（如多个 nginx），验证多 LB 实例下的连接均衡。留空则回退到单个 `JANUS_DOWNSTREAM_HOST` |
 | `JANUS_DOWNSTREAM_SERVICE` | janus-server | 下游服务名 |
 | `JANUS_REGISTER` | none | 注册中心：`nacos` / `etcd` / `none` |
 | `JANUS_REGISTER_PROTOCOL` | 由 `JANUS_REGISTER` 推导（etcd→`grpc`，其余→`ws`） | 本节点向注册中心公布的协议 / 端口，即上游以何协议访问本节点：`ws`（公布 WS 端口）/ `grpc`（公布 gRPC 端口）。与注册中心类型解耦——本项目中 S2 注册到 Nacos 但由 S1 经 gRPC 访问（设为 `grpc`），S3 注册到 etcd 但由 S2 经 WS 访问（设为 `ws`） |
 | `JANUS_NACOS_ENDPOINT` | localhost:8848 | Nacos 地址 |
 | `JANUS_ETCD_ENDPOINT` | http://localhost:2379 | etcd 地址 |
-| `JANUS_OTEL_ENABLED` | Y | 是否启用 OpenTelemetry |
+| `JANUS_OTEL_ENABLED` | Y | 是否启用 OpenTelemetry tracing / OTLP 导出 |
+| `JANUS_METRICS_ENABLED` | Y | 是否启用 Prometheus `/metrics` 端口。与 `JANUS_OTEL_ENABLED` 独立，实验栈可关闭 tracing 但保留 metrics |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | http://localhost:4317 | OTLP 端点 |
 | `OTEL_SERVICE_NAME` | janus | 服务名称（代码自动追加 `-{SERVER_ID}`） |
 | `JANUS_AUTH_TOKEN` | （空） | 可选的 WebSocket 共享令牌鉴权。留空（默认）时不校验；设置后，入站 WS 握手必须携带匹配的 `authToken` 请求头，下游 WS 转发客户端也会自动带上该头（比较为常量时间，避免时序侧信道） |
-| `JANUS_WS_POOL_SIZE` | 8 | 下游 WS 转发连接池大小。每条连接以 `request_id` 多路复用大量并发在途请求；连接按轮询分散到已发现的下游实例 |
+| `JANUS_WS_POOL_SIZE` | 8 | 下游 WS 转发连接池大小。每条连接以 `request_id` 多路复用大量并发在途请求；转发每个请求时按「在途请求数最少（least in-flight）」挑选连接，做请求级均衡；建池时连接按轮询分散到已发现（或静态配置）的下游实例 |
 | `JANUS_WS_FORWARD_TIMEOUT_MS` | 10000 | 单次下游 WS 往返超时（毫秒） |
 | `JANUS_WS_CONN_LOST_TIMEOUT_SEC` | 20 | WS 连接探活窗口（秒）。服务端与转发连接池按此周期发送协议级 ping，超时无 pong 即关闭连接，加快半开/分区连接的探测与重连（库默认 60s）。设为 0 关闭该检测 |
 | `JANUS_SHUTDOWN_DRAIN_MS` | 2000 | 优雅下线排空窗口（毫秒）。在从注册中心注销之后、关闭入站监听之前暂停，让上游感知注销、在途请求完成，避免停机瞬间给上游制造错误。设为 0 关闭（快速重启/测试） |
@@ -233,6 +237,8 @@ docker run -d --name jaeger -p 16686:16686 -p 4317:4317 \
 - [架构文档](doc/architecture.md) — 系统架构、模块设计、可观测性架构
 - [使用指南](doc/guide.md) — 详细的使用说明、故障排查
 - [协议规范](doc/protocol.md) — 统一消息信封、三种线路编码、协议转换规则
+- [服务发现 Cookbook](doc/cookbook.md) — Nacos / etcd 注册发现与 gRPC NameResolver 实现细节
+- [负载均衡实验](doc/load-balance.md) — nginx 反向代理下 front→backend 的负载均衡（LB-1）、连接数限制（CONN-1）、请求限流（RATE-1）、共享连接饥饿（CONN-2）、多实例 nginx 均衡（LB-2）、backend 实例扩缩容（SCALE-1）与单实例重启（RESTART-1）验证
 
 ## 许可证
 

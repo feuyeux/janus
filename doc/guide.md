@@ -394,50 +394,56 @@ docker run -d --name jaeger -p 16686:16686 -p 4317:4317 \
 
 终端节点 (S3)：
 ```bash
-java -jar target/janus.jar \
-  -DJANUS_SERVER_ID=server-iii \
-  -DJANUS_WS_MODE=binary \
-  -DJANUS_REGISTER=etcd \
-  -DJANUS_REGISTER_PROTOCOL=ws \
-  -DJANUS_ETCD_ENDPOINT=http://localhost:2379 \
-  -DJANUS_ADVERTISED_HOST=localhost \
-  -DJANUS_OTEL_ENABLED=Y \
-  -DOTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 \
-  -DOTEL_SERVICE_NAME=janus
+env \
+  JANUS_SERVER_ID=server-iii \
+  JANUS_WS_MODE=binary \
+  JANUS_REGISTER=etcd \
+  JANUS_REGISTER_PROTOCOL=ws \
+  JANUS_ETCD_ENDPOINT=http://localhost:2379 \
+  JANUS_ADVERTISED_HOST=localhost \
+  JANUS_OTEL_ENABLED=Y \
+  JANUS_METRICS_ENABLED=Y \
+  OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 \
+  OTEL_SERVICE_NAME=janus \
+  java -jar target/janus.jar
 ```
 
 中间节点 (S2)：
 ```bash
-java -jar target/janus.jar \
-  -DJANUS_SERVER_ID=server-ii \
-  -DJANUS_DOWNSTREAM_PROTOCOL=ws \
-  -DJANUS_DOWNSTREAM_WS_MODE=binary \
-  -DJANUS_DOWNSTREAM_DISCOVERY=etcd \
-  -DJANUS_REGISTER=nacos \
-  -DJANUS_REGISTER_PROTOCOL=grpc \
-  -DJANUS_NACOS_ENDPOINT=localhost:8848 \
-  -DJANUS_ETCD_ENDPOINT=http://localhost:2379 \
-  -DJANUS_ADVERTISED_HOST=localhost \
-  -DJANUS_OTEL_ENABLED=Y \
-  -DOTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 \
-  -DOTEL_SERVICE_NAME=janus
+env \
+  JANUS_SERVER_ID=server-ii \
+  JANUS_DOWNSTREAM_PROTOCOL=ws \
+  JANUS_DOWNSTREAM_WS_MODE=binary \
+  JANUS_DOWNSTREAM_DISCOVERY=etcd \
+  JANUS_REGISTER=nacos \
+  JANUS_REGISTER_PROTOCOL=grpc \
+  JANUS_NACOS_ENDPOINT=localhost:8848 \
+  JANUS_ETCD_ENDPOINT=http://localhost:2379 \
+  JANUS_ADVERTISED_HOST=localhost \
+  JANUS_OTEL_ENABLED=Y \
+  JANUS_METRICS_ENABLED=Y \
+  OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 \
+  OTEL_SERVICE_NAME=janus \
+  java -jar target/janus.jar
 ```
 
 入口节点 (S1)：
 ```bash
-java -jar target/janus.jar \
-  -DJANUS_SERVER_ID=server-i \
-  -DJANUS_WS_MODE=json \
-  -DJANUS_DOWNSTREAM_PROTOCOL=grpc \
-  -DJANUS_DOWNSTREAM_DISCOVERY=nacos \
-  -DJANUS_NACOS_ENDPOINT=localhost:8848 \
-  -DJANUS_ADVERTISED_HOST=localhost \
-  -DJANUS_OTEL_ENABLED=Y \
-  -DOTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 \
-  -DOTEL_SERVICE_NAME=janus
+env \
+  JANUS_SERVER_ID=server-i \
+  JANUS_WS_MODE=json \
+  JANUS_DOWNSTREAM_PROTOCOL=grpc \
+  JANUS_DOWNSTREAM_DISCOVERY=nacos \
+  JANUS_NACOS_ENDPOINT=localhost:8848 \
+  JANUS_ADVERTISED_HOST=localhost \
+  JANUS_OTEL_ENABLED=Y \
+  JANUS_METRICS_ENABLED=Y \
+  OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 \
+  OTEL_SERVICE_NAME=janus \
+  java -jar target/janus.jar
 ```
 
-> 注意：`OTEL_SERVICE_NAME` 是基础名称，代码会自动追加 `-{SERVER_ID}` 后缀（如 `janus-server-i`）。
+> 注意：`OTEL_SERVICE_NAME` 是基础名称，代码会自动追加 `-{SERVER_ID}` 后缀（如 `janus-server-i`）。`JANUS_OTEL_ENABLED` 只控制 tracing / OTLP 导出，`JANUS_METRICS_ENABLED` 单独控制 Prometheus `/metrics` 端口。
 
 ### 5.4 可选：WebSocket 共享令牌鉴权
 
