@@ -7,7 +7,9 @@ import io.opentelemetry.api.common.Attributes;
 import io.opentelemetry.api.metrics.LongCounter;
 import io.opentelemetry.api.metrics.Meter;
 import io.opentelemetry.api.trace.Tracer;
+import io.opentelemetry.api.trace.propagation.W3CTraceContextPropagator;
 import io.opentelemetry.context.Context;
+import io.opentelemetry.context.propagation.ContextPropagators;
 import io.opentelemetry.context.propagation.TextMapGetter;
 import io.opentelemetry.context.propagation.TextMapSetter;
 import io.opentelemetry.exporter.otlp.trace.OtlpGrpcSpanExporter;
@@ -33,6 +35,7 @@ public final class OtelSupport {
     private static PrometheusHttpServer prometheusServer;
     private static LongCounter rpcCallsCounter;
     private static LongCounter wsMessagesCounter;
+    private static LongCounter wsConnectionsCounter;
 
     private OtelSupport() {}
 
@@ -40,16 +43,26 @@ public final class OtelSupport {
         return ServerConfig.OTEL_ENABLED;
     }
 
+    public static boolean metricsEnabled() {
+        return ServerConfig.METRICS_ENABLED;
+    }
+
     public static synchronized OpenTelemetry initOtel(String serviceName) {
         if (openTelemetry != null) {
             return openTelemetry;
         }
-        if (!otelEnabled()) {
+
+        if (!otelEnabled() && !metricsEnabled()) {
+            log.info("OpenTelemetry and Prometheus metrics disabled: service={}", serviceName);
             openTelemetry = OpenTelemetry.noop();
             return openTelemetry;
+        } else if (otelEnabled() && metricsEnabled()) {
+            log.info("Initializing OpenTelemetry: service={}, endpoint={}", serviceName, ServerConfig.OTEL_ENDPOINT);
+        } else if (otelEnabled()) {
+            log.info("Initializing OpenTelemetry tracing only: service={}, endpoint={}", serviceName, ServerConfig.OTEL_ENDPOINT);
+        } else {
+            log.info("Initializing Prometheus metrics only: service={}", serviceName);
         }
-
-        log.info("Initializing OpenTelemetry: service={}, endpoint={}", serviceName, ServerConfig.OTEL_ENDPOINT);
 
         Resource resource = Resource.getDefault()
                 .merge(Resource.create(Attributes.of(
@@ -57,44 +70,55 @@ public final class OtelSupport {
                         io.opentelemetry.api.common.AttributeKey.stringKey("service.instance.id"),
                         ServerConfig.SERVER_ID)));
 
-        // Traces: OTLP gRPC exporter -> Jaeger/OTLP collector
-        OtlpGrpcSpanExporter spanExporter = OtlpGrpcSpanExporter.builder()
-                .setEndpoint(ServerConfig.OTEL_ENDPOINT)
-                .build();
+        var sdkBuilder = OpenTelemetrySdk.builder()
+                .setPropagators(ContextPropagators.create(W3CTraceContextPropagator.getInstance()));
 
-        SdkTracerProvider tracerProvider = SdkTracerProvider.builder()
-                .addSpanProcessor(BatchSpanProcessor.builder(spanExporter).build())
-                .setResource(resource)
-                .build();
+        if (metricsEnabled()) {
+            // Metrics: Prometheus HTTP server (scraped by Prometheus).
+            prometheusServer = PrometheusHttpServer.builder()
+                    .setHost("0.0.0.0")
+                    .setPort(ServerConfig.METRICS_PORT)
+                    .build();
 
-        // Metrics: Prometheus HTTP server (scraped by Prometheus)
-        prometheusServer = PrometheusHttpServer.builder()
-                .setHost("0.0.0.0")
-                .setPort(ServerConfig.METRICS_PORT)
-                .build();
+            SdkMeterProvider meterProvider = SdkMeterProvider.builder()
+                    .registerMetricReader(prometheusServer)
+                    .setResource(resource)
+                    .build();
+            sdkBuilder.setMeterProvider(meterProvider);
+        }
 
-        SdkMeterProvider meterProvider = SdkMeterProvider.builder()
-                .registerMetricReader(prometheusServer)
-                .setResource(resource)
-                .build();
+        if (otelEnabled()) {
+            // Traces: OTLP gRPC exporter -> Jaeger/OTLP collector.
+            OtlpGrpcSpanExporter spanExporter = OtlpGrpcSpanExporter.builder()
+                    .setEndpoint(ServerConfig.OTEL_ENDPOINT)
+                    .build();
 
-        openTelemetry = OpenTelemetrySdk.builder()
-                .setTracerProvider(tracerProvider)
-                .setMeterProvider(meterProvider)
-                .build();
+            SdkTracerProvider tracerProvider = SdkTracerProvider.builder()
+                    .addSpanProcessor(BatchSpanProcessor.builder(spanExporter).build())
+                    .setResource(resource)
+                    .build();
+            sdkBuilder.setTracerProvider(tracerProvider);
+        }
 
-        // Initialize counters
-        Meter meter = openTelemetry.getMeter("janus-server-java");
-        rpcCallsCounter = meter.counterBuilder("rpc_calls_total")
-                .setDescription("Total number of RPC calls handled")
-                .setUnit("{call}")
-                .build();
-        wsMessagesCounter = meter.counterBuilder("ws_messages_total")
-                .setDescription("Total number of WebSocket messages handled")
-                .setUnit("{message}")
-                .build();
+        openTelemetry = sdkBuilder.build();
 
-        log.info("OpenTelemetry initialized: metrics on port {}", ServerConfig.METRICS_PORT);
+        if (metricsEnabled()) {
+            // Initialize counters.
+            Meter meter = openTelemetry.getMeter("janus-server-java");
+            rpcCallsCounter = meter.counterBuilder("rpc_calls_total")
+                    .setDescription("Total number of RPC calls handled")
+                    .setUnit("{call}")
+                    .build();
+            wsMessagesCounter = meter.counterBuilder("ws_messages_total")
+                    .setDescription("Total number of WebSocket messages handled")
+                    .setUnit("{message}")
+                    .build();
+            wsConnectionsCounter = meter.counterBuilder("ws_connections_total")
+                    .setDescription("Total number of WebSocket connections accepted")
+                    .setUnit("{connection}")
+                    .build();
+            log.info("Prometheus metrics initialized on port {}", ServerConfig.METRICS_PORT);
+        }
         return openTelemetry;
     }
 
@@ -117,6 +141,10 @@ public final class OtelSupport {
         return wsMessagesCounter;
     }
 
+    public static LongCounter wsConnectionsCounter() {
+        return wsConnectionsCounter;
+    }
+
     public static void recordRpcCall(String method) {
         if (rpcCallsCounter != null) {
             rpcCallsCounter.add(1, Attributes.of(
@@ -128,6 +156,13 @@ public final class OtelSupport {
         if (wsMessagesCounter != null) {
             wsMessagesCounter.add(1, Attributes.of(
                     io.opentelemetry.api.common.AttributeKey.stringKey("type"), type));
+        }
+    }
+
+    public static void recordWsConnection(String protocol) {
+        if (wsConnectionsCounter != null) {
+            wsConnectionsCounter.add(1, Attributes.of(
+                    io.opentelemetry.api.common.AttributeKey.stringKey("protocol"), protocol));
         }
     }
 

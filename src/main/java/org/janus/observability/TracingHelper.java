@@ -14,9 +14,11 @@ import java.util.Map;
 public class TracingHelper {
     private static final Logger log = LoggerFactory.getLogger(TracingHelper.class);
 
+    private final OpenTelemetry openTelemetry;
     private final Tracer tracer;
 
     public TracingHelper(OpenTelemetry openTelemetry) {
+        this.openTelemetry = openTelemetry;
         this.tracer = openTelemetry.getTracer("janus-server-java");
     }
 
@@ -31,7 +33,7 @@ public class TracingHelper {
      * from starting a second, disconnected trace.
      */
     public Span startServerSpan(String spanName, Map<String, String> traceContext) {
-        Context parentContext = OtelSupport.getOpenTelemetry().getPropagators()
+        Context parentContext = openTelemetry.getPropagators()
                 .getTextMapPropagator()
                 .extract(Context.current(), traceContext, OtelSupport.mapGetter());
 
@@ -43,7 +45,7 @@ public class TracingHelper {
         // Overwrite the carrier so the started server span is the parent for any
         // downstream span or forwarded envelope built from this same context.
         Context withSpan = span.storeInContext(parentContext);
-        OtelSupport.getOpenTelemetry().getPropagators()
+        openTelemetry.getPropagators()
                 .getTextMapPropagator()
                 .inject(withSpan, traceContext, OtelSupport.mapSetter());
 
@@ -59,7 +61,7 @@ public class TracingHelper {
      * Start a client span and inject trace context into a Map carrier for propagation.
      */
     public Span startClientSpan(String spanName, Map<String, String> traceContext) {
-        Context parentContext = OtelSupport.getOpenTelemetry().getPropagators()
+        Context parentContext = openTelemetry.getPropagators()
                 .getTextMapPropagator()
                 .extract(Context.current(), traceContext, OtelSupport.mapGetter());
 
@@ -69,7 +71,7 @@ public class TracingHelper {
                 .startSpan();
 
         Context withSpan = span.storeInContext(parentContext);
-        OtelSupport.getOpenTelemetry().getPropagators()
+        openTelemetry.getPropagators()
                 .getTextMapPropagator()
                 .inject(withSpan, traceContext, OtelSupport.mapSetter());
 

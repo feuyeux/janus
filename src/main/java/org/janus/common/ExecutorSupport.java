@@ -1,5 +1,6 @@
 package org.janus.common;
 
+import org.janus.config.ServerConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -7,6 +8,8 @@ import java.lang.reflect.Method;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -31,14 +34,91 @@ public final class ExecutorSupport {
 
     private ExecutorSupport() {}
 
+    /** Bounded backlog for the serial executor before its overflow policy kicks in. */
+    private static final int SERIAL_QUEUE_CAPACITY = 1_000;
+
     /**
-     * Create an executor for request handling.
+     * Serial-mode overflow policy for transports that can cheaply signal
+     * "server busy" back to the client: log and reject with
+     * {@link RejectedExecutionException} so the caller sheds load. The WS server
+     * catches this and replies with a 503-style error frame. Work is never
+     * inlined onto the caller (I/O) thread.
+     */
+    public static final RejectedExecutionHandler SHED_ON_OVERFLOW = (r, exec) -> {
+        log.warn("Serial handler queue full ({} queued); shedding task", exec.getQueue().size());
+        throw new RejectedExecutionException("serial handler queue full");
+    };
+
+    /**
+     * Serial-mode overflow policy that applies <em>backpressure</em> instead of
+     * rejecting: the submitting thread blocks until the single worker frees a
+     * queue slot. Used by the gRPC path, where a raw rejection from the server
+     * call executor surfaces to the client as an opaque stream reset rather than
+     * a clean status; blocking the transport thread instead propagates HTTP/2
+     * flow-control backpressure to the client. Crucially it enqueues the task
+     * (via {@link LinkedBlockingQueue#put}) rather than running it on the caller,
+     * so the single worker still processes requests strictly one at a time.
+     */
+    public static final RejectedExecutionHandler BLOCK_ON_OVERFLOW = (r, exec) -> {
+        if (exec.isShutdown()) {
+            throw new RejectedExecutionException("serial handler shut down");
+        }
+        try {
+            exec.getQueue().put(r);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RejectedExecutionException("interrupted while enqueuing serial task", e);
+        }
+    };
+
+    /**
+     * Create an executor for request handling, using {@link #SHED_ON_OVERFLOW}
+     * as the serial-mode overflow policy (suitable for the WS server).
      *
      * @param name     thread-name prefix (also used for the virtual-thread name)
      * @param maxPlatformThreads upper bound for the platform-thread fallback pool;
      *                           ignored when virtual threads are available
      */
     public static ExecutorService newHandlerExecutor(String name, int maxPlatformThreads) {
+        return newHandlerExecutor(name, maxPlatformThreads, SHED_ON_OVERFLOW);
+    }
+
+    /**
+     * Create an executor for request handling with an explicit serial-mode
+     * overflow policy.
+     *
+     * <p>The {@code serialOverflowPolicy} only takes effect when
+     * {@code JANUS_HANDLER_SERIAL=Y}; the default (non-serial) virtual-thread /
+     * bounded platform-thread paths are unaffected. Transports differ in how a
+     * saturated serial backend should degrade: WS uses {@link #SHED_ON_OVERFLOW}
+     * (clean 503), gRPC uses {@link #BLOCK_ON_OVERFLOW} (transport backpressure)
+     * because a rejected server-call task would otherwise become an opaque
+     * stream reset.
+     *
+     * @param name     thread-name prefix (also used for the virtual-thread name)
+     * @param maxPlatformThreads upper bound for the platform-thread fallback pool;
+     *                           ignored when virtual threads are available
+     * @param serialOverflowPolicy overflow handler for the serial (single-thread)
+     *                             executor; ignored outside serial mode
+     */
+    public static ExecutorService newHandlerExecutor(String name, int maxPlatformThreads,
+            RejectedExecutionHandler serialOverflowPolicy) {
+        // Serial mode: a single worker thread processes requests strictly one at a
+        // time. Chosen explicitly (JANUS_HANDLER_SERIAL=Y) to model a serial backend
+        // for load-balancer experiments; overrides the virtual-thread path so the
+        // one-at-a-time guarantee holds even on JDK 21+. A bounded queue absorbs a
+        // small backlog; on overflow the supplied policy decides whether to shed
+        // (WS → 503) or apply backpressure (gRPC → block the transport thread).
+        if (ServerConfig.HANDLER_SERIAL) {
+            String mode = serialOverflowPolicy == BLOCK_ON_OVERFLOW ? "block/backpressure" : "shed";
+            log.info("Serial handler executor for [{}] (single-threaded, one request at a time, overflow={})",
+                    name, mode);
+            ThreadPoolExecutor serial = new ThreadPoolExecutor(
+                    1, 1, 0L, TimeUnit.MILLISECONDS,
+                    new LinkedBlockingQueue<>(SERIAL_QUEUE_CAPACITY), namedFactory(name),
+                    serialOverflowPolicy);
+            return serial;
+        }
         ExecutorService vt = tryVirtualThreadExecutor();
         if (vt != null) {
             log.info("Using virtual-thread executor for [{}]", name);

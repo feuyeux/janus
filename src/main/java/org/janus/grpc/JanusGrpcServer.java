@@ -24,8 +24,13 @@ public class JanusGrpcServer {
     private final JanusServiceImpl service;
     // Dedicated handler executor (virtual threads on JDK 21+) so RPC handling and
     // blocking downstream forwards scale to high concurrency with low latency.
+    // In serial mode (JANUS_HANDLER_SERIAL=Y) overflow applies backpressure rather
+    // than shedding: a rejected server-call task would surface to the client as an
+    // opaque stream reset, whereas blocking the transport thread propagates clean
+    // HTTP/2 flow-control backpressure. See ExecutorSupport.BLOCK_ON_OVERFLOW.
     private final ExecutorService handlerExecutor =
-            ExecutorSupport.newHandlerExecutor("grpc-handler", ServerConfig.HANDLER_MAX_THREADS);
+            ExecutorSupport.newHandlerExecutor("grpc-handler", ServerConfig.HANDLER_MAX_THREADS,
+                    ExecutorSupport.BLOCK_ON_OVERFLOW);
 
     public JanusGrpcServer(JanusServiceImpl service) {
         this.service = service;
@@ -101,7 +106,18 @@ public class JanusGrpcServer {
                 Thread.currentThread().interrupt();
             }
         }
+        // Bound the wait for the handler executor's in-flight tasks so the JVM
+        // doesn't hang on shutdown if a downstream forward is stuck. Then force
+        // shutdown if the drain window expires.
         handlerExecutor.shutdown();
+        try {
+            if (!handlerExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
+                handlerExecutor.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            handlerExecutor.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
         log.info("gRPC server stopped");
     }
 
