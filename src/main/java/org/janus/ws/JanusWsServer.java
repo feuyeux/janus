@@ -38,6 +38,10 @@ public class JanusWsServer extends WebSocketServer {
 
     private final ChainHandler chainHandler;
     private final ExecutorService handlerExecutor;
+    // Live count of accepted, still-open connections. Only used to enforce the
+    // optional hard cap (JANUS_WS_MAX_CONN); 0/disabled leaves it as a no-op gauge.
+    private final java.util.concurrent.atomic.AtomicInteger openConnections =
+            new java.util.concurrent.atomic.AtomicInteger();
 
     public JanusWsServer(int port, ChainHandler chainHandler) {
         super(new InetSocketAddress(port));
@@ -98,8 +102,22 @@ public class JanusWsServer extends WebSocketServer {
             return;
         }
 
+        // Optional hard cap on concurrently open connections. Reserve a slot
+        // atomically; if we would exceed the cap, roll back and reject the
+        // handshake so this node models a strictly connection-limited backend.
+        int cap = ServerConfig.WS_MAX_CONN;
+        if (cap > 0) {
+            if (openConnections.incrementAndGet() > cap) {
+                openConnections.decrementAndGet();
+                log.warn("[{}] Rejected WS handshake: connection cap {} reached (path={})", userId, cap, path);
+                conn.close(CloseFrame.TRY_AGAIN_LATER, "connection limit reached");
+                return;
+            }
+        }
+
         conn.setAttachment(new Session(userId, path));
-        log.info("[{}] session+ path={}", userId, path);
+        log.info("[{}] session+ path={} (open={})", userId, path, openConnections.get());
+        OtelSupport.recordWsConnection(wantsBinary ? "binary" : "json");
         OtelSupport.recordWsMessage("connect");
 
         // For binary protocol, send BONJOUR
@@ -217,6 +235,12 @@ public class JanusWsServer extends WebSocketServer {
     @Override
     public void onClose(WebSocket conn, int code, String reason, boolean remote) {
         Session session = conn.getAttachment();
+        // Release a cap slot only for connections we actually counted. An accepted
+        // connection always has a session attachment; handshakes rejected in onOpen
+        // (auth/protocol/cap) do not, so they must not decrement the gauge.
+        if (session != null && ServerConfig.WS_MAX_CONN > 0) {
+            openConnections.decrementAndGet();
+        }
         log.info("[{}] session- code={} reason={}",
                 session != null ? session.userId : "?", code, reason);
     }

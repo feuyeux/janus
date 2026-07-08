@@ -146,8 +146,8 @@ public class JanusWsClient {
         for (int i = 0; i < needed; i++) {
             ServiceRegistry.ServiceInstance inst = instances.get(i % instances.size());
             String url = scheme + "://" + inst.host() + ":" + inst.port() + path;
-            MultiplexClient c = new MultiplexClient(URI.create(url));
-            if (c.connectWithRetry(2)) {
+            MultiplexClient c = MultiplexClient.connectWithRetry(URI.create(url), 2);
+            if (c != null) {
                 pool.add(c);
                 log.info("WS forwarding connection established: {}", url);
             } else {
@@ -214,6 +214,11 @@ public class JanusWsClient {
                 // Nothing was transmitted on this connection; safe to try another.
                 lastNotSent = nse;
                 triggerRefill();
+            } finally {
+                // Release the slot reserved by pickHealthy() on every outcome
+                // (success, timeout, interrupt, not-sent, or a post-send error that
+                // propagates out uncaught), keeping the in-flight counter balanced.
+                client.release();
             }
             // NOTE: a post-send failure surfaces as a plain RuntimeException from
             // roundTrip and is intentionally NOT caught here, so it propagates
@@ -223,16 +228,73 @@ public class JanusWsClient {
                 lastNotSent != null ? lastNotSent.getCause() : null);
     }
 
+    /**
+     * Pick a connection for the next request by <b>least in-flight requests</b>
+     * and immediately <em>reserve</em> a slot on it.
+     *
+     * <p>These connections are <em>multiplexed</em>: each carries many concurrent
+     * requests correlated by {@code request_id}. Balancing therefore must count
+     * <b>requests</b>, not connections — the connection-count metric (nginx
+     * {@code least_conn}) is decoupled from real request load here, because one
+     * connection can hold hundreds of in-flight requests while another sits idle.
+     * Selecting the least-loaded connection is the multiplexing-correct analog of
+     * "least connections" and spreads request load evenly across the pool (and,
+     * when the pool fans out across discovered backends, across those backends).
+     *
+     * <p><b>Race-free assignment:</b> the chosen connection's in-flight counter is
+     * incremented ({@link MultiplexClient#reserve()}) before this method returns,
+     * so a burst of concurrent callers no longer all observe the same connection
+     * as idle and pile onto it — each caller's reservation is visible to the next.
+     * The reservation is released in {@link #roundTripLoop} once the round-trip
+     * completes (on any outcome). A rotating start index breaks ties fairly so
+     * equal-load connections are not all served from slot 0.
+     */
     private MultiplexClient pickHealthy() {
         MultiplexClient[] snapshot = pool.toArray(new MultiplexClient[0]);
         int n = snapshot.length;
+        if (n == 0) {
+            return null;
+        }
+        int[] loads = new int[n];
+        boolean[] open = new boolean[n];
         for (int i = 0; i < n; i++) {
-            MultiplexClient c = snapshot[Math.floorMod(roundRobin.getAndIncrement(), n)];
-            if (c.isOpen()) {
-                return c;
+            open[i] = snapshot[i].isOpen();
+            loads[i] = snapshot[i].inFlight();
+        }
+        int start = Math.floorMod(roundRobin.getAndIncrement(), n);
+        int idx = selectLeastLoadedIndex(loads, open, start);
+        if (idx < 0) {
+            return null;
+        }
+        MultiplexClient chosen = snapshot[idx];
+        chosen.reserve(); // reserve immediately so concurrent selectors see the load
+        return chosen;
+    }
+
+    /**
+     * Pure selection core (package-private for testing): return the index of the
+     * open connection with the fewest in-flight requests, scanning from
+     * {@code start} so ties rotate. Returns {@code -1} when no connection is open.
+     * An idle (load 0) connection short-circuits the scan since nothing can beat it.
+     */
+    static int selectLeastLoadedIndex(int[] loads, boolean[] open, int start) {
+        int n = loads.length;
+        int best = -1;
+        int bestLoad = Integer.MAX_VALUE;
+        for (int i = 0; i < n; i++) {
+            int idx = (start + i) % n;
+            if (!open[idx]) {
+                continue;
+            }
+            if (loads[idx] < bestLoad) {
+                best = idx;
+                bestLoad = loads[idx];
+                if (bestLoad == 0) {
+                    break; // cannot do better than an idle connection
+                }
             }
         }
-        return null;
+        return best;
     }
 
     public void shutdown() {
@@ -269,6 +331,27 @@ public class JanusWsClient {
 
         private final ConcurrentHashMap<String, CompletableFuture<Object>> pending = new ConcurrentHashMap<>();
 
+        // Requests assigned to this connection but not yet completed. Incremented
+        // at selection time (reserve) rather than at send time so concurrent
+        // selectors observe the load immediately — closing the pick race where
+        // many callers would otherwise all target the same "idle" connection.
+        private final AtomicInteger inFlight = new AtomicInteger();
+
+        /** Number of requests currently reserved/in-flight on this connection. */
+        int inFlight() {
+            return inFlight.get();
+        }
+
+        /** Reserve a slot the instant this connection is chosen (see pickHealthy). */
+        void reserve() {
+            inFlight.incrementAndGet();
+        }
+
+        /** Release the slot when the round-trip completes (any outcome). */
+        void release() {
+            inFlight.decrementAndGet();
+        }
+
         MultiplexClient(URI serverUri) {
             super(serverUri);
             addHeader("userId", "janus-ws-client-" + UUID.randomUUID().toString().substring(0, 8));
@@ -293,26 +376,34 @@ public class JanusWsClient {
             }
         }
 
-        boolean connectWithRetry(int attempts) {
+        static MultiplexClient connectWithRetry(URI serverUri, int attempts) {
             for (int a = 1; a <= attempts; a++) {
+                MultiplexClient client = new MultiplexClient(serverUri);
                 try {
-                    if (connectBlocking(5, TimeUnit.SECONDS) && isOpen()) {
-                        return true;
+                    if (client.connectBlocking(5, TimeUnit.SECONDS) && client.isOpen()) {
+                        return client;
                     }
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
-                    return false;
+                    return null;
+                } catch (RuntimeException e) {
+                    log.debug("WS forwarding connect attempt failed for {}: {}", serverUri, e.getMessage());
+                }
+                try {
+                    client.close();
+                } catch (Exception ignored) {
+                    // failed WebSocketClient instances cannot be reused
                 }
                 if (a < attempts) {
                     try {
                         Thread.sleep(1000);
                     } catch (InterruptedException e) {
                         Thread.currentThread().interrupt();
-                        return false;
+                        return null;
                     }
                 }
             }
-            return false;
+            return null;
         }
 
         Object roundTrip(String correlationId, Object payload, long timeoutMs)

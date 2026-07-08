@@ -47,4 +47,35 @@ class ChainHandlerLocalTest {
         JsonNode node = MAPPER.readTree(responseJson);
         assertEquals("ERROR", node.path("mode").asText());
     }
+
+    /**
+     * The WS server is an entry point — it should never see a RESPONSE/ERROR
+     * envelope over the wire (downstream replies flow back through the
+     * multiplexed forwarding client, not via a new server-side request).
+     * Receiving one was previously misrouted as a fresh request, which would
+     * either loop the chain or silently swallow the real reply. Now it must
+     * come back as a hard 400-style ERROR envelope.
+     */
+    @Test
+    void responseModeJsonEnvelopeIsRejected() throws Exception {
+        ChainHandler handler = newHandler();
+        String inbound = "{\"method\":\"TALK\",\"mode\":\"RESPONSE\",\"data\":\"0\",\"meta\":\"u\",\"request_id\":\"upstream-reply\"}";
+        JsonNode node = MAPPER.readTree(handler.handleJsonRequest(inbound, new HashMap<>()));
+
+        assertEquals("ERROR", node.path("mode").asText(), "non-REQUEST JSON must be refused");
+        assertEquals("upstream-reply", node.path("request_id").asText(),
+                "correlation id must be preserved so the upstream can match");
+        assertTrue(node.path("error_msg").asText().contains("non-request"),
+                "error_msg should name the cause; got: " + node.path("error_msg").asText());
+    }
+
+    @Test
+    void errorModeJsonEnvelopeIsRejected() throws Exception {
+        ChainHandler handler = newHandler();
+        String inbound = "{\"method\":\"TALK\",\"mode\":\"ERROR\",\"error_msg\":\"downstream blew up\"}";
+        JsonNode node = MAPPER.readTree(handler.handleJsonRequest(inbound, new HashMap<>()));
+
+        assertEquals("ERROR", node.path("mode").asText());
+        assertTrue(node.path("error_msg").asText().contains("non-request"));
+    }
 }

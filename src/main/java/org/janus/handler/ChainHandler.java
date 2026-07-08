@@ -61,6 +61,20 @@ public class ChainHandler {
             return safeErrorJson(null, e);
         }
 
+        // The WS server is an ENTRY point. A WS text frame arriving with
+        // mode=RESPONSE/ERROR is not a valid request — downstream replies flow
+        // back through the multiplexed forwarding client's request_id, not via a
+        // new server-side request. Refuse it as a 400 (protocol error) instead
+        // of routing it downstream, which would either loop the chain or confuse
+        // the next hop. Null/missing mode is treated as REQUEST (legacy clients).
+        if (request.mode() != null && !request.isRequest()) {
+            log.warn("Rejecting JSON envelope with non-REQUEST mode={} corr={}; expected inbound REQUEST only",
+                    request.mode(), request.requestId());
+            OtelSupport.recordWsMessage("json-bad-mode");
+            return safeErrorJson(request, new IllegalArgumentException(
+                    "non-request frame rejected: mode=" + request.mode()));
+        }
+
         OtelSupport.recordWsMessage("json-" + request.method());
 
         // WS text frames can't attach per-message headers, so rebuild the parent
@@ -93,6 +107,21 @@ public class ChainHandler {
         }
 
         String methodName = JanusMessage.methodFromIndex(frame.method());
+        // A WS server only ever receives REQUEST frames over the wire: downstream
+        // REPLY/ERROR frames are matched by the multiplexed forwarding client via
+        // request_id, never by re-entering the server's MSG_JANUS handler. A
+        // non-REQUEST frame here is therefore a protocol error (e.g. an upstream
+        // peer bounced a reply back into the entry point) — refuse it loudly
+        // instead of silently routing it downstream, which would either loop the
+        // chain or confuse the next hop.
+        if (frame.mode() != 0) {
+            log.warn("Rejecting MSG_JANUS frame with non-REQUEST mode={} corr={}; expected inbound REQUEST only",
+                    frame.mode(), frame.requestId());
+            OtelSupport.recordWsMessage("binary-bad-mode");
+            return BinaryCodec.encodeJanus(
+                    frame.method(), 2, 0, true,
+                    400, "", "", "", "", "non-request frame rejected", frame.requestId(), null);
+        }
         Span span = tracingHelper.startServerSpan("ws-binary-" + methodName, traceContext);
         OtelSupport.recordWsMessage("binary-" + methodName);
 
@@ -101,7 +130,7 @@ public class ChainHandler {
             // correlation id so a multiplexed binary connection can match replies.
             JanusMessage request = new JanusMessage(
                     methodName,
-                    frame.mode() == 0 ? JanusMessage.MODE_REQUEST : JanusMessage.MODE_RESPONSE,
+                    JanusMessage.MODE_REQUEST,
                     frame.data(), frame.meta(),
                     null, null, null,
                     frame.traceId(), frame.spanId(),
