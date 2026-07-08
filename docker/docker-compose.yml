@@ -132,7 +132,7 @@ services:
 
   # ════════════════════════════════════════════════════════════════════════
   # Janus Servers
-  # Chain: Postman → S1 (WS) → [Nacos] → S2 (WS) → [etcd] → S3 (gRPC)
+  # Chain: Postman → S1 (WS) → [Nacos] → S2 (gRPC) → [etcd] → S3 (WS Binary)
   # ════════════════════════════════════════════════════════════════════════
 
   janus-server-i:
@@ -146,12 +146,22 @@ services:
       - JANUS_GRPC_PORT=9090
       - JANUS_METRICS_PORT=9100
       - JANUS_ADVERTISED_HOST=janus-server-i
-      # Entry node: receives from Postman, forwards via WS to S2
-      - JANUS_DOWNSTREAM_PROTOCOL=ws
-      - JANUS_DOWNSTREAM_DISCOVERY=nacos
+      # Entry node: receives WS JSON from Postman, forwards via gRPC to S2.
+      # Use STATIC discovery (not Nacos NameResolver) — the Nacos 3.2.2 server
+      # in standalone mode has the v3 inner-api auth identity check enabled
+      # even when NACOS_AUTH_ENABLE=false, and the bundled Nacos Java SDK
+      # cannot establish a usable gRPC connection in that mode, leaving the
+      # gRPC channel with no addresses and hanging requests. Pointing the
+      # downstream at a fixed host:port bypasses the problem and is the
+      # recommended fallback for the single-binary compose stack.
+      - JANUS_DOWNSTREAM_PROTOCOL=grpc
+      - JANUS_DOWNSTREAM_DISCOVERY=static
+      - JANUS_DOWNSTREAM_HOST=janus-server-ii
+      - JANUS_DOWNSTREAM_PORT=9090
       - JANUS_DOWNSTREAM_SERVICE=janus-server
       - JANUS_REGISTER=none
-      # Discovery endpoints
+      # Discovery endpoints (kept for parity with the other nodes; not used
+      # because DOWNSTREAM_DISCOVERY=static)
       - JANUS_NACOS_ENDPOINT=nacos:8848
       - JANUS_ETCD_ENDPOINT=http://etcd:2379
       # Observability
@@ -163,8 +173,8 @@ services:
       - "9091:9090"   # gRPC
       - "9101:9100"   # Metrics
     depends_on:
-      nacos:
-        condition: service_healthy
+      janus-server-ii:
+        condition: service_started
       jaeger:
         condition: service_started
     restart: unless-stopped
@@ -182,12 +192,14 @@ services:
       - JANUS_GRPC_PORT=9090
       - JANUS_METRICS_PORT=9100
       - JANUS_ADVERTISED_HOST=janus-server-ii
-      # Middle node: receives via WS from S1, forwards via gRPC to S3
-      - JANUS_DOWNSTREAM_PROTOCOL=grpc
+      # Middle node: receives via gRPC from S1, forwards via WS Binary to S3
+      - JANUS_DOWNSTREAM_PROTOCOL=ws
+      - JANUS_DOWNSTREAM_WS_MODE=binary
       - JANUS_DOWNSTREAM_DISCOVERY=etcd
       - JANUS_DOWNSTREAM_SERVICE=janus-server
-      # Register in Nacos so S1 can discover this server
+      # Register in Nacos so S1 can discover this server (advertised as gRPC)
       - JANUS_REGISTER=nacos
+      - JANUS_REGISTER_PROTOCOL=grpc
       # Discovery endpoints
       - JANUS_NACOS_ENDPOINT=nacos:8848
       - JANUS_ETCD_ENDPOINT=http://etcd:2379
@@ -221,11 +233,13 @@ services:
       - JANUS_GRPC_PORT=9090
       - JANUS_METRICS_PORT=9100
       - JANUS_ADVERTISED_HOST=janus-server-iii
-      # Terminal node: receives via gRPC from S2, processes locally
+      # Terminal node: receives WS Binary from S2, processes locally
       - JANUS_DOWNSTREAM_PROTOCOL=none
       - JANUS_DOWNSTREAM_DISCOVERY=none
-      # Register in etcd so S2 can discover this server
+      # Register in etcd so S2 can discover this server (advertised as WS Binary)
       - JANUS_REGISTER=etcd
+      - JANUS_REGISTER_PROTOCOL=ws
+      - JANUS_WS_MODE=binary
       # Discovery endpoints
       - JANUS_NACOS_ENDPOINT=nacos:8848
       - JANUS_ETCD_ENDPOINT=http://etcd:2379

@@ -4,14 +4,17 @@ global:
   evaluation_interval: 15s
 
 scrape_configs:
-  - job_name: 'janus-server-I'
+  # Hostnames must match the container_name in docker-compose.yml exactly.
+  # Earlier drafts used 'janus-server-I/II/III' (uppercase) and silently
+  # scraped nothing because the actual containers are 'janus-server-i/ii/iii'.
+  - job_name: 'janus-server-i'
     static_configs:
-      - targets: ['janus-server-I:9100']
+      - targets: ['janus-server-i:9100']
 
-  - job_name: 'janus-server-II'
+  - job_name: 'janus-server-ii'
     static_configs:
-      - targets: ['janus-server-II:9100']
+      - targets: ['janus-server-ii:9100']
 
-  - job_name: 'janus-server-III'
+  - job_name: 'janus-server-iii'
     static_configs:
-      - targets: ['janus-server-III:9100']
+      - targets: ['janus-server-iii:9100']
