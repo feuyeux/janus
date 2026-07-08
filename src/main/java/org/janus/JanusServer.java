@@ -32,6 +32,7 @@ import java.util.concurrent.TimeUnit;
  *
  * Observability:
  *   JANUS_OTEL_ENABLED         - Y/N (default Y)
+ *   JANUS_METRICS_ENABLED      - Y/N (default Y)
  *   OTEL_EXPORTER_OTLP_ENDPOINT   - OTLP endpoint (e.g., http://jaeger:4317)
  *   JANUS_METRICS_PORT         - Prometheus metrics port (default 9100)
  */
@@ -60,6 +61,7 @@ public class JanusServer {
         log.info("║   Downstream:      {} via {}", ServerConfig.DOWNSTREAM_PROTOCOL, ServerConfig.DOWNSTREAM_DISCOVERY);
         log.info("║   Register:        {}", ServerConfig.REGISTER);
         log.info("║   OTel Enabled:    {}", ServerConfig.OTEL_ENABLED);
+        log.info("║   Metrics Enabled: {}", ServerConfig.METRICS_ENABLED);
         log.info("║   OTel Endpoint:   {}", ServerConfig.OTEL_ENDPOINT);
         log.info("╚════════════════════════════════════════════════════════════════");
 
@@ -115,7 +117,9 @@ public class JanusServer {
         log.info("║   WebSocket:  ws://{}:{}/json  (JSON mode)", ServerConfig.ADVERTISED_HOST, ServerConfig.WS_PORT);
         log.info("║   WebSocket:  ws://{}:{}/binary (Binary mode)", ServerConfig.ADVERTISED_HOST, ServerConfig.WS_PORT);
         log.info("║   gRPC:       {}:{}", ServerConfig.ADVERTISED_HOST, ServerConfig.GRPC_PORT);
-        log.info("║   Metrics:    http://{}:{}/metrics", ServerConfig.ADVERTISED_HOST, ServerConfig.METRICS_PORT);
+        if (ServerConfig.METRICS_ENABLED) {
+            log.info("║   Metrics:    http://{}:{}/metrics", ServerConfig.ADVERTISED_HOST, ServerConfig.METRICS_PORT);
+        }
         log.info("╚════════════════════════════════════════════════════════════════");
 
         // 9. Shutdown hook
@@ -135,7 +139,72 @@ public class JanusServer {
             discoveryRegistry = new NacosRegistry(ServerConfig.NACOS_ENDPOINT);
         } else if (ServerConfig.isEtcdDiscovery()) {
             discoveryRegistry = new EtcdRegistry(ServerConfig.ETCD_ENDPOINT);
+        } else if (ServerConfig.isStaticDiscovery()) {
+            // Forward to fixed address(es) (e.g. one or several nginx LBs) instead
+            // of a discovered instance list. The pool opens its connections across
+            // them; each proxy spreads its share over the real backends.
+            java.util.List<ServiceRegistry.ServiceInstance> statics = parseStaticDownstreams();
+            if (statics.isEmpty()) {
+                log.error("JANUS_DOWNSTREAM_DISCOVERY=static but neither JANUS_DOWNSTREAM_HOSTS "
+                        + "nor JANUS_DOWNSTREAM_HOST is set; downstream forwarding will be unavailable");
+            } else {
+                discoveryRegistry = new StaticRegistry(statics);
+            }
         }
+    }
+
+    /**
+     * Parse {@code JANUS_DOWNSTREAM_HOSTS} (comma-separated {@code host[:port]},
+     * port defaults to {@code JANUS_DOWNSTREAM_PORT}) into static instances;
+     * falls back to the single {@code JANUS_DOWNSTREAM_HOST}/{@code _PORT}.
+     */
+    private static java.util.List<ServiceRegistry.ServiceInstance> parseStaticDownstreams() {
+        return parseStaticDownstreams(
+                ServerConfig.DOWNSTREAM_HOSTS,
+                ServerConfig.DOWNSTREAM_HOST,
+                ServerConfig.DOWNSTREAM_PORT,
+                ServerConfig.DOWNSTREAM_PROTOCOL);
+    }
+
+    /**
+     * Pure, side-effect-free parser (package-private for testing).
+     *
+     * <p>{@code hostsCsv} takes precedence: a comma-separated list of
+     * {@code host[:port]} entries (blank entries skipped; port defaults to
+     * {@code defaultPort} when omitted or unparseable). When {@code hostsCsv} is
+     * blank it falls back to the single {@code singleHost}/{@code defaultPort}.
+     * Returns an empty list when neither is configured.
+     */
+    static java.util.List<ServiceRegistry.ServiceInstance> parseStaticDownstreams(
+            String hostsCsv, String singleHost, int defaultPort, String protocol) {
+        java.util.List<ServiceRegistry.ServiceInstance> out = new java.util.ArrayList<>();
+        String hosts = hostsCsv == null ? "" : hostsCsv.trim();
+        if (!hosts.isEmpty()) {
+            for (String entry : hosts.split(",")) {
+                String e = entry.trim();
+                if (e.isEmpty()) {
+                    continue;
+                }
+                String host;
+                int port;
+                int idx = e.lastIndexOf(':');
+                if (idx > 0) {
+                    host = e.substring(0, idx);
+                    try {
+                        port = Integer.parseInt(e.substring(idx + 1).trim());
+                    } catch (NumberFormatException nfe) {
+                        port = defaultPort;
+                    }
+                } else {
+                    host = e;
+                    port = defaultPort;
+                }
+                out.add(new ServiceRegistry.ServiceInstance(host, port, protocol));
+            }
+        } else if (singleHost != null && !singleHost.isEmpty()) {
+            out.add(new ServiceRegistry.ServiceInstance(singleHost, defaultPort, protocol));
+        }
+        return out;
     }
 
     private void registerService() {

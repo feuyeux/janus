@@ -32,6 +32,15 @@ public class NacosNameResolver extends NameResolver {
     // Last non-empty resolved address set, kept so a transient empty result does
     // not clear the load balancer.
     private volatile List<EquivalentAddressGroup> lastGood = List.of();
+    // Background retry thread that re-attempts the initial selectInstances() /
+    // subscribe() until the NamingService becomes usable. Nacos's gRPC client
+    // is itself async — on a cold start, the first selectInstances() can fail
+    // with "Client not connected, current status:STARTING" before the SDK has
+    // established its connection. Without this loop, the gRPC channel would
+    // never receive an onAddresses() callback and requests would hang until
+    // the application restarted.
+    private Thread bootstrapRetry;
+    private volatile boolean bootstrapped = false;
 
     public NacosNameResolver(URI targetUri, NamingService namingService) {
         this.serviceName = targetUri.getAuthority();
@@ -45,6 +54,13 @@ public class NacosNameResolver extends NameResolver {
 
     @Override
     public void start(Listener listener) {
+        // gRPC may call start() more than once in some rebind paths; a second
+        // call must not re-subscribe to Nacos (which would deliver each event
+        // twice to update()) and must not flip the address set twice.
+        if (this.listener != null) {
+            this.listener.onAddresses(lastGood, Attributes.EMPTY);
+            return;
+        }
         this.listener = listener;
         if (namingService == null) {
             log.error("Nacos NamingService unavailable; cannot resolve [{}]", serviceName);
@@ -58,6 +74,43 @@ public class NacosNameResolver extends NameResolver {
         } catch (NacosException e) {
             log.error("Nacos subscribe failed for [{}]: {}", serviceName, e.getErrMsg());
         }
+        // If the initial update() and subscribe() both failed (the typical
+        // cold-start case where the Nacos SDK is still in STARTING state),
+        // spin up a single background retry thread that re-attempts until
+        // either a non-empty address set has been delivered, or the
+        // NamingService reaches 30 seconds without becoming usable. The
+        // thread exits as soon as bootstrapped=true; it never holds a lock.
+        if (!bootstrapped) {
+            startBootstrapRetry();
+        }
+    }
+
+    private void startBootstrapRetry() {
+        Thread t = new Thread(() -> {
+            long deadline = System.currentTimeMillis() + 30_000L;
+            while (!bootstrapped && System.currentTimeMillis() < deadline) {
+                try {
+                    Thread.sleep(500);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+                try {
+                    namingService.subscribe(serviceName, event -> update());
+                    // subscribe() succeeded → NamingService is reachable; now
+                    // selectInstances should also work, or it will be retried
+                    // via the push listener on the next server push.
+                    bootstrapped = true;
+                    update();
+                } catch (NacosException e) {
+                    // NamingService still STARTING (or the server briefly
+                    // unreachable). Keep retrying until deadline.
+                }
+            }
+        }, "nacos-resolver-bootstrap-" + serviceName);
+        t.setDaemon(true);
+        t.start();
+        bootstrapRetry = t;
     }
 
     @Override
@@ -100,6 +153,7 @@ public class NacosNameResolver extends NameResolver {
                 return;
             }
             lastGood = groups;
+            bootstrapped = true;
             log.debug("Resolved {} healthy instances for [{}] from Nacos", groups.size(), serviceName);
             current.onAddresses(groups, Attributes.EMPTY);
         } catch (NacosException e) {

@@ -43,13 +43,25 @@ public class JanusGrpcClient {
                         .defaultLoadBalancingPolicy(Constants.LB_ROUND_ROBIN);
                 log.info("gRPC client via etcd discovery: {}", target);
             } else if (ServerConfig.isNacosDiscovery()) {
-                String target = "nacos://" + ServerConfig.DOWNSTREAM_SERVICE;
-                NacosNameResolverProvider provider = new NacosNameResolverProvider(
-                        URI.create("nacos://" + ServerConfig.NACOS_ENDPOINT));
-                NameResolverRegistry.getDefaultRegistry().register(provider);
-                builder = NettyChannelBuilder.forTarget(target)
-                        .defaultLoadBalancingPolicy(Constants.LB_ROUND_ROBIN);
-                log.info("gRPC client via Nacos discovery: {}", target);
+                // Nacos 2.x and 3.x clients ship a gRPC-based NameResolver, but its
+                // client SDK has to be carefully configured for the current Nacos
+                // version (auth identity, server-status, push connection) and a
+                // transient "Client not connected, current status:STARTING" error
+                // leaves the gRPC channel with no addresses and a forever-hanging
+                // request. The simpler and more robust path is to use the same
+                // registry we already use for WS forwarding — NacosRegistry has
+                // been verified to work and returns instances directly.
+                List<ServiceRegistry.ServiceInstance> instances =
+                        registry.discover(ServerConfig.DOWNSTREAM_SERVICE);
+                if (instances.isEmpty()) {
+                    log.error("No downstream instances discovered via Nacos registry; "
+                            + "the gRPC channel will not have a peer to connect to");
+                    return;
+                }
+                ServiceRegistry.ServiceInstance inst = instances.get(0);
+                builder = NettyChannelBuilder.forAddress(inst.host(), inst.port());
+                log.info("gRPC client via Nacos discovery: {}:{}",
+                        inst.host(), inst.port());
             } else {
                 // Direct connection using discovered instances
                 List<ServiceRegistry.ServiceInstance> instances =

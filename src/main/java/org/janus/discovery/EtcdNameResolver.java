@@ -151,8 +151,15 @@ public class EtcdNameResolver extends NameResolver implements Watch.Listener {
     }
 
     private static String getUriFromDir(String dir) {
-        String tmp = dir.replace("://", "~");
-        String[] tmps = tmp.split("/");
-        return tmps[tmps.length - 1].replace("~", "://");
+        // Strip the service-dir prefix (everything up to and including the first
+        // '/') to recover the URI portion of the key. Using indexOf('/') is
+        // safer than split() — a port-less or IPv6 host cannot accidentally
+        // inject extra '/' segments that the previous replace/rewrite would
+        // then mis-fold back into '://'.
+        int slash = dir.indexOf('/');
+        if (slash < 0 || slash == dir.length() - 1) {
+            return dir;
+        }
+        return dir.substring(slash + 1);
     }
 }

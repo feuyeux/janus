@@ -44,8 +44,23 @@ public class ServerConfig {
 
     // Downstream configuration
     public static final String DOWNSTREAM_PROTOCOL = getEnv("JANUS_DOWNSTREAM_PROTOCOL", "none"); // ws, grpc, none
-    public static final String DOWNSTREAM_DISCOVERY = getEnv("JANUS_DOWNSTREAM_DISCOVERY", "none"); // nacos, etcd, none
+    public static final String DOWNSTREAM_DISCOVERY = getEnv("JANUS_DOWNSTREAM_DISCOVERY", "none"); // nacos, etcd, static, none
     public static final String DOWNSTREAM_SERVICE = getEnv("JANUS_DOWNSTREAM_SERVICE", SVC_DISC_NAME);
+    // Static downstream target used when DOWNSTREAM_DISCOVERY=static: the
+    // forwarding client talks to this fixed host:port instead of a discovered
+    // instance list. This is how a node forwards to a reverse proxy (e.g. nginx)
+    // that itself load-balances across the real backends — the
+    // client → front → [nginx LB] → backend×N topology. Port defaults to WS_PORT.
+    public static final String DOWNSTREAM_HOST = getEnv("JANUS_DOWNSTREAM_HOST", "");
+    public static final int DOWNSTREAM_PORT = getIntEnv("JANUS_DOWNSTREAM_PORT", WS_PORT);
+    // Optional MULTIPLE static downstreams: a comma-separated list of host[:port]
+    // entries (port defaults to DOWNSTREAM_PORT when omitted). When set with
+    // DOWNSTREAM_DISCOVERY=static, the forwarding pool is spread across all of
+    // them — e.g. pointing a front at several nginx instances to study whether
+    // the aggregate front→backend connection distribution stays balanced when the
+    // load balancer itself is multi-instance. Empty → fall back to the single
+    // DOWNSTREAM_HOST/DOWNSTREAM_PORT.
+    public static final String DOWNSTREAM_HOSTS = getEnv("JANUS_DOWNSTREAM_HOSTS", "");
     // Wire encoding used by the WS forwarding client: "json" (text frames on
     // /json) or "binary" (MSG_JANUS frames on /binary). Only meaningful when
     // DOWNSTREAM_PROTOCOL=ws. Defaults to json.
@@ -71,6 +86,7 @@ public class ServerConfig {
 
     // Observability
     public static final boolean OTEL_ENABLED = "Y".equalsIgnoreCase(getEnv("JANUS_OTEL_ENABLED", "Y"));
+    public static final boolean METRICS_ENABLED = "Y".equalsIgnoreCase(getEnv("JANUS_METRICS_ENABLED", "Y"));
     public static final String OTEL_ENDPOINT = getEnv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317");
     // Base service name; the code appends "-{SERVER_ID}". Kept as "janus" to
     // match docker-compose and the documented default.
@@ -97,6 +113,19 @@ public class ServerConfig {
     // Upper bound for the fallback platform-thread handler pools (ignored when
     // virtual threads are available at runtime).
     public static final int HANDLER_MAX_THREADS = getIntEnv("JANUS_HANDLER_MAX_THREADS", 512);
+    // Hard cap on concurrently OPEN inbound WebSocket connections accepted by this
+    // node. 0 (the default) means unlimited, preserving existing behaviour. When
+    // set (e.g. 3), handshakes beyond the cap are rejected at onOpen so a node can
+    // model a strictly connection-limited backend — used by the exp-2 B tier.
+    public static final int WS_MAX_CONN = getIntEnv("JANUS_WS_MAX_CONN", 0);
+    // When Y, request handling runs on a SINGLE-THREADED executor, so this node
+    // processes inbound requests strictly serially (one at a time) regardless of
+    // how many connections are open. Default N keeps the high-concurrency virtual-
+    // thread / pooled executor. Used by the exp-2 B tier to demonstrate a serial
+    // backend behind the load balancer. Independent of the transport (applies to
+    // both WS and gRPC handler executors).
+    public static final boolean HANDLER_SERIAL =
+            "Y".equalsIgnoreCase(getEnv("JANUS_HANDLER_SERIAL", "N"));
     // gRPC max inbound message size (bytes) and concurrent streams per connection.
     public static final int GRPC_MAX_INBOUND_MSG = getIntEnv("JANUS_GRPC_MAX_INBOUND_MSG", 16 * 1024 * 1024);
     public static final int GRPC_MAX_CONCURRENT_CALLS = getIntEnv("JANUS_GRPC_MAX_CONCURRENT_CALLS", 0); // 0 = unlimited
@@ -193,6 +222,15 @@ public class ServerConfig {
 
     public static boolean isEtcdDiscovery() {
         return "etcd".equalsIgnoreCase(DOWNSTREAM_DISCOVERY);
+    }
+
+    /**
+     * True when the downstream target is a fixed host:port (JANUS_DOWNSTREAM_HOST
+     * / JANUS_DOWNSTREAM_PORT) rather than a discovered instance list — used to
+     * forward to an nginx reverse proxy that load-balances the real backends.
+     */
+    public static boolean isStaticDiscovery() {
+        return "static".equalsIgnoreCase(DOWNSTREAM_DISCOVERY);
     }
 
     public static boolean registerNacos() {
