@@ -51,3 +51,8 @@ Thumbs.db
 # Env / secrets
 *.env
 .env.*
+
+# Local profiling assets
+.tools/arthas/
+arthas-output/
+.run/
