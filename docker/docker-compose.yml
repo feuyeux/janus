@@ -10,9 +10,15 @@ services:
     environment:
       - MODE=standalone
       - NACOS_AUTH_ENABLE=false
-      - NACOS_AUTH_TOKEN=SmFudXNTZXJ2ZXJBdXRoVG9rZW4yMDI2U2VjcmV0S2V5
-      - NACOS_AUTH_IDENTITY_KEY=janus
-      - NACOS_AUTH_IDENTITY_VALUE=janus
+      # Nacos v3.x requires a Base64 NACOS_AUTH_TOKEN even when
+      # NACOS_AUTH_ENABLE=false (see AGENTS.md). This is a fixed
+      # placeholder required to satisfy the server's startup check, not a
+      # real credential guarding access. Override via a local .env file
+      # (git-ignored) if you need a different value; the default below
+      # keeps the stack runnable out of the box.
+      - NACOS_AUTH_TOKEN=${JANUS_NACOS_AUTH_TOKEN:-SmFudXNTZXJ2ZXJBdXRoVG9rZW4yMDI2U2VjcmV0S2V5}
+      - NACOS_AUTH_IDENTITY_KEY=${JANUS_NACOS_AUTH_IDENTITY_KEY:-janus}
+      - NACOS_AUTH_IDENTITY_VALUE=${JANUS_NACOS_AUTH_IDENTITY_VALUE:-janus}
     ports:
       - "8848:8848"
       - "9848:9848"
@@ -116,8 +122,11 @@ services:
     image: grafana/grafana:12.2.10
     container_name: grafana
     environment:
-      - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      # Demo-only credentials. Override via a local .env file (git-ignored)
+      # for anything beyond a disposable local stack; never reuse this
+      # password outside a trusted local environment.
+      - GF_SECURITY_ADMIN_USER=${JANUS_GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${JANUS_GRAFANA_ADMIN_PASSWORD:-admin}
       - GF_USERS_ALLOW_SIGN_UP=false
     volumes:
       - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro

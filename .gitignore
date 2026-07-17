@@ -51,6 +51,9 @@ Thumbs.db
 # Env / secrets
 *.env
 .env.*
+# Allow the sample env file in docker/ to be committed so users have a
+# template for local overrides; real .env files stay ignored.
+!docker/.env.example
 
 # Local profiling assets
 .tools/arthas/
